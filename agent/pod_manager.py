@@ -227,6 +227,64 @@ class PodManager:
 
         return pod_name, endpoint
 
+    def create_profiled_pod(
+        self,
+        vllm_args: list[str],
+        profiler_config,
+    ) -> tuple[str, str]:
+        """Create experiment pod with profiler annotations for webhook injection.
+
+        Same as create_pod but overlays profiler annotations so the
+        mutating webhook injects PyTorch profiler instrumentation.
+        """
+        pod_name = self._generate_pod_name()
+        local_port = self._next_port
+        self._next_port += 1
+
+        print(f">> PodManager: Creating profiled pod {pod_name}", flush=True)
+        print(f"   vLLM args: {vllm_args}", flush=True)
+        print(f"   Profiler ranges: {profiler_config.ranges}", flush=True)
+
+        manifest = self._build_pod_manifest(pod_name, vllm_args)
+
+        annotations = manifest["metadata"].setdefault("annotations", {})
+        annotations.update(profiler_config.to_annotations())
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", prefix=f"{pod_name}_", delete=False
+        ) as tmp:
+            yaml.dump(manifest, tmp, default_flow_style=False)
+            tmp_path = tmp.name
+
+        try:
+            apply_cmd = self._build_oc_base() + ["apply", "-f", tmp_path]
+            result = subprocess.run(apply_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                raise RuntimeError(f"oc apply failed: {result.stderr}")
+            print(f"   Pod {pod_name} created with profiler annotations.", flush=True)
+        finally:
+            os.unlink(tmp_path)
+
+        print(f"   Waiting for pod {pod_name} to be ready...", flush=True)
+        self._wait_for_ready(pod_name, timeout=300)
+        print(f"   Pod {pod_name} is ready.", flush=True)
+
+        print(f"   Starting port-forward :{local_port} -> {pod_name}:8000", flush=True)
+        pf_proc = self._start_port_forward(pod_name, local_port)
+        print(f"   Port-forward active (pid={pf_proc.pid}).", flush=True)
+
+        endpoint = f"http://localhost:{local_port}"
+
+        self.active_pods[pod_name] = {
+            "port_forward_proc": pf_proc,
+            "local_port": local_port,
+            "vllm_args": vllm_args,
+            "endpoint": endpoint,
+            "profiler_config": profiler_config,
+        }
+
+        return pod_name, endpoint
+
     def delete_pod(self, pod_name: str) -> None:
         """Delete an experiment pod and kill its port-forward process.
 

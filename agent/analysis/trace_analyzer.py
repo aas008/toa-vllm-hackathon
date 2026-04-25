@@ -466,3 +466,204 @@ def analyze_trace(
 
     except Exception as exc:
         return {"status": "error", "message": f"Failed to analyze trace: {exc}"}
+
+
+# ===================================================================== #
+#  Profiler table parsing (from profile-analyser)                        #
+# ===================================================================== #
+
+import re
+from pathlib import Path
+
+
+def parse_key_averages_table(raw_table: str) -> list[dict]:
+    """Parse torch profiler key_averages() table output into structured dicts."""
+    if not raw_table.strip():
+        return []
+
+    lines = raw_table.strip().splitlines()
+    entries = []
+    header_line = None
+    data_started = False
+    separator_count = 0
+
+    for line in lines:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if re.match(r'^-+(\s+-+)+$', stripped) or stripped.startswith('---'):
+            separator_count += 1
+            if separator_count == 2:
+                data_started = True
+            continue
+        if separator_count == 1 and header_line is None:
+            header_line = stripped
+            continue
+        if data_started and stripped and not stripped.startswith('Self CPU time total'):
+            parts = re.split(r'\s{2,}', stripped)
+            if len(parts) >= 4:
+                entry = {"name": parts[0]}
+                for i, val in enumerate(parts[1:], 1):
+                    entry[f"col_{i}"] = val
+                entries.append(entry)
+
+    return entries
+
+
+def summarize_table(raw_table: str, top_n: int = 15) -> str:
+    """Produce LLM-friendly text summary of key_averages table."""
+    if not raw_table.strip():
+        return "No profiler table data available."
+
+    lines = raw_table.strip().splitlines()
+    summary_lines = []
+    data_lines = []
+    header = None
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("Self CPU time total"):
+            summary_lines.append(stripped)
+        elif re.match(r'^-+(\s+-+)*$', stripped) or stripped.startswith('---'):
+            continue
+        elif header is None and ("Self CPU" in stripped or "Name" in stripped):
+            header = stripped
+        elif stripped:
+            data_lines.append(stripped)
+
+    parts = [f"Profiler key_averages table ({len(data_lines)} entries):"]
+    if header:
+        parts.append(f"Columns: {header}")
+    parts.append(f"Top {min(top_n, len(data_lines))} entries:")
+    for dl in data_lines[:top_n]:
+        parts.append(f"  {dl}")
+    if summary_lines:
+        parts.append("\n".join(summary_lines))
+
+    return "\n".join(parts)
+
+
+def parse_chrome_trace_file(trace_path: str) -> dict:
+    """Parse Chrome trace JSON file and compute aggregate GPU/CPU metrics."""
+    path = Path(trace_path)
+    if not path.exists():
+        return {}
+
+    import json
+    with open(path) as f:
+        data = json.load(f)
+
+    events = data if isinstance(data, list) else data.get("traceEvents", [])
+    if not events:
+        return {}
+
+    GPU_CATS = {"kernel", "gpu_memcpy"}
+    CPU_CATS = {"cpu_op", "cuda_runtime"}
+
+    gpu_kernel_stats: dict[str, dict] = {}
+    cpu_op_stats: dict[str, dict] = {}
+    categories: dict[str, float] = {}
+    total_gpu_time = 0.0
+    total_cpu_time = 0.0
+    min_ts = float("inf")
+    max_ts = 0.0
+
+    for ev in events:
+        if ev.get("ph") != "X":
+            continue
+        name = ev.get("name", "unknown")
+        dur = ev.get("dur", 0)
+        cat = ev.get("cat", "other")
+        ts = ev.get("ts", 0)
+
+        if cat in ("python_function", "Trace", "overhead", "none"):
+            continue
+
+        min_ts = min(min_ts, ts)
+        max_ts = max(max_ts, ts + dur)
+        categories[cat] = categories.get(cat, 0) + dur
+
+        if cat in GPU_CATS:
+            total_gpu_time += dur
+            stats = gpu_kernel_stats
+        else:
+            total_cpu_time += dur
+            stats = cpu_op_stats
+
+        if name not in stats:
+            stats[name] = {"count": 0, "total_dur": 0, "max_dur": 0, "min_dur": float("inf")}
+        ks = stats[name]
+        ks["count"] += 1
+        ks["total_dur"] += dur
+        ks["max_dur"] = max(ks["max_dur"], dur)
+        ks["min_dur"] = min(ks["min_dur"], dur)
+
+    wall_time = max_ts - min_ts if max_ts > min_ts else 1
+    gpu_utilization = (total_gpu_time / wall_time * 100) if wall_time > 0 else 0
+
+    top_kernels = sorted(gpu_kernel_stats.items(), key=lambda x: x[1]["total_dur"], reverse=True)[:20]
+    top_cpu_ops = sorted(cpu_op_stats.items(), key=lambda x: x[1]["total_dur"], reverse=True)[:10]
+
+    return {
+        "wall_time_us": wall_time,
+        "total_gpu_time_us": total_gpu_time,
+        "total_cpu_time_us": total_cpu_time,
+        "gpu_utilization_pct": round(gpu_utilization, 2),
+        "num_events": len(events),
+        "categories": categories,
+        "top_kernels": [
+            {
+                "name": name,
+                "count": s["count"],
+                "total_us": s["total_dur"],
+                "avg_us": s["total_dur"] / s["count"],
+                "pct_of_gpu": round(s["total_dur"] / max(total_gpu_time, 1) * 100, 2),
+            }
+            for name, s in top_kernels
+        ],
+        "top_cpu_ops": [
+            {
+                "name": name,
+                "count": s["count"],
+                "total_us": s["total_dur"],
+                "avg_us": s["total_dur"] / s["count"],
+            }
+            for name, s in top_cpu_ops
+        ],
+    }
+
+
+def summarize_trace_file(trace_data: dict, top_n: int = 10) -> str:
+    """Produce LLM-friendly text summary of Chrome trace analysis."""
+    if not trace_data:
+        return "No trace data available."
+
+    parts = []
+    wall_ms = trace_data["wall_time_us"] / 1000
+    gpu_ms = trace_data["total_gpu_time_us"] / 1000
+    cpu_ms = trace_data["total_cpu_time_us"] / 1000
+
+    parts.append(f"Chrome Trace Analysis ({trace_data['num_events']} events):")
+    parts.append(f"  Wall time: {wall_ms:.1f}ms")
+    parts.append(f"  GPU time: {gpu_ms:.1f}ms  CPU time: {cpu_ms:.1f}ms")
+    parts.append(f"  GPU utilization: {trace_data['gpu_utilization_pct']:.1f}%")
+
+    cats = trace_data.get("categories", {})
+    if cats:
+        parts.append("  Categories:")
+        for cat, dur in sorted(cats.items(), key=lambda x: x[1], reverse=True)[:5]:
+            parts.append(f"    {cat}: {dur/1000:.1f}ms")
+
+    kernels = trace_data.get("top_kernels", [])
+    if kernels:
+        parts.append(f"  Top {min(top_n, len(kernels))} GPU kernels by time:")
+        for k in kernels[:top_n]:
+            parts.append(f"    {k['name']}: {k['total_us']/1000:.2f}ms ({k['pct_of_gpu']:.1f}%) x{k['count']}")
+
+    cpu_ops = trace_data.get("top_cpu_ops", [])
+    if cpu_ops:
+        parts.append(f"  Top {min(5, len(cpu_ops))} CPU ops by time:")
+        for op in cpu_ops[:5]:
+            parts.append(f"    {op['name']}: {op['total_us']/1000:.2f}ms x{op['count']}")
+
+    return "\n".join(parts)

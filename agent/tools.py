@@ -670,6 +670,79 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "deploy_profiled_pod",
+        "description": (
+            "Create an experiment pod with PyTorch profiler injection. The profiler "
+            "webhook intercepts the pod and injects instrumentation that wraps "
+            "vLLM's Worker.execute_model with torch.profiler. After the pod is ready "
+            "and you send enough inference requests to reach the profiling range, "
+            "use collect_profile to retrieve kernel-level analysis. "
+            "Returns pod_name and endpoint (same as create_vllm_pod)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vllm_args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Extra vLLM CLI args (same as create_vllm_pod).",
+                },
+                "profiler_ranges": {
+                    "type": "string",
+                    "description": (
+                        "Which execute_model call ranges to profile. Format: 'start-end' "
+                        "or 'start1-end1,start2-end2'. Default: '100-150'. "
+                        "Use '10-30' for warmup, '100-150' for steady-state."
+                    ),
+                    "default": "100-150",
+                },
+                "profiler_activities": {
+                    "type": "string",
+                    "description": "Activities to profile: 'CPU,CUDA' (default) or 'CUDA' only.",
+                    "default": "CPU,CUDA",
+                },
+                "profiler_memory": {
+                    "type": "string",
+                    "description": "Profile memory allocations. Default: 'false'.",
+                    "default": "false",
+                },
+            },
+            "required": ["vllm_args"],
+        },
+    },
+    {
+        "name": "collect_profile",
+        "description": (
+            "Send inference requests to a profiled pod, wait for profiler completion, "
+            "then extract the key_averages table and Chrome trace. Returns kernel-level "
+            "analysis: GPU utilization %, top kernels by time, category breakdown, "
+            "top CPU ops. Use after deploy_profiled_pod to get GPU kernel analysis."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pod_name": {
+                    "type": "string",
+                    "description": "Name of the profiled pod (from deploy_profiled_pod).",
+                },
+                "num_requests": {
+                    "type": "integer",
+                    "description": (
+                        "Number of inference requests to send. Must be >= profiler range end + 10. "
+                        "Default: 160 (covers default range 100-150)."
+                    ),
+                    "default": 160,
+                },
+                "max_tokens": {
+                    "type": "integer",
+                    "description": "Max tokens per inference request. Default: 50.",
+                    "default": 50,
+                },
+            },
+            "required": ["pod_name"],
+        },
+    },
+    {
         "name": "done",
         "description": (
             "Signal that the tuning session is complete. Call this when you have "
@@ -1949,6 +2022,234 @@ def _format_metrics_snapshot(snapshot, label: str) -> str:
     return "\n".join(lines)
 
 
+def _handle_deploy_profiled_pod(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+    *,
+    pod_manager: Optional[PodManager] = None,
+) -> ToolResult:
+    """Create an experiment pod with profiler annotations."""
+    from .analysis.profiler_types import ProfilerConfig
+
+    vllm_args = args["vllm_args"]
+    config = ProfilerConfig(
+        ranges=args.get("profiler_ranges", "100-150"),
+        activities=args.get("profiler_activities", "CPU,CUDA"),
+        memory=args.get("profiler_memory", "false"),
+    )
+
+    command_history.append({
+        "tool": "deploy_profiled_pod",
+        "vllm_args": vllm_args,
+        "profiler_ranges": config.ranges,
+    })
+
+    if pod_manager is None:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="deploy_profiled_pod", success=False, output="",
+            error="PodManager not configured. Use --pod-template and --oc-mode.",
+        )
+
+    try:
+        pod_name, endpoint = pod_manager.create_profiled_pod(vllm_args, config)
+        command_history[-1]["success"] = True
+        command_history[-1]["pod_name"] = pod_name
+        return ToolResult(
+            tool="deploy_profiled_pod", success=True,
+            output=(
+                f"Profiled experiment pod created.\n"
+                f"  Pod name: {pod_name}\n"
+                f"  Endpoint: {endpoint}\n"
+                f"  Profiler ranges: {config.ranges}\n"
+                f"  Activities: {config.activities}\n"
+                f"  vLLM args: {' '.join(vllm_args)}\n\n"
+                f"Next: call collect_profile(pod_name=\"{pod_name}\", "
+                f"num_requests={config.max_call_count() + 10}) to trigger profiling "
+                f"and retrieve kernel analysis."
+            ),
+        )
+    except Exception as e:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="deploy_profiled_pod", success=False, output="",
+            error=f"Failed to create profiled pod: {e}",
+        )
+
+
+def _handle_collect_profile(
+    args: dict,
+    executor: RemoteExecutor,
+    command_history: list[dict],
+    *,
+    pod_manager: Optional[PodManager] = None,
+    namespace: Optional[str] = None,
+    kubeconfig: Optional[str] = None,
+) -> ToolResult:
+    """Send requests, wait for profiler, collect and analyze results."""
+    import os
+    import re
+    import time as _time
+
+    pod_name = args["pod_name"]
+    num_requests = args.get("num_requests", 160)
+    max_tokens = args.get("max_tokens", 50)
+
+    command_history.append({
+        "tool": "collect_profile",
+        "pod_name": pod_name,
+        "num_requests": num_requests,
+    })
+
+    # Get model name from pod manager
+    pod_info = pod_manager.active_pods.get(pod_name, {}) if pod_manager else {}
+    profiler_config = pod_info.get("profiler_config")
+
+    # Create executor targeting the profiled pod
+    target_executor = OcExecutor(
+        namespace=namespace or "toa-hack",
+        pod_name=pod_name,
+        kubeconfig=kubeconfig,
+    )
+
+    # Get model name from vLLM
+    model_result = target_executor.run(
+        "curl -sf http://localhost:8000/v1/models 2>/dev/null | head -20",
+        timeout=15,
+    )
+    model_name = "unknown"
+    if model_result.success:
+        import json as _json
+        try:
+            models = _json.loads(model_result.stdout)
+            model_name = models["data"][0]["id"]
+        except Exception:
+            pass
+
+    # Step 1: Send inference requests
+    payload = _json.dumps({
+        "model": model_name,
+        "prompt": "Explain the concept of machine learning in detail:",
+        "max_tokens": max_tokens,
+        "temperature": 0.7,
+    })
+
+    successful = 0
+    for i in range(num_requests):
+        result = target_executor.run(
+            f"curl -sf -X POST http://localhost:8000/v1/completions "
+            f"-H 'Content-Type: application/json' -d '{payload}'",
+            timeout=30,
+        )
+        if result.success:
+            successful += 1
+        if (i + 1) % 20 == 0:
+            print(f"   Sent {i + 1}/{num_requests} requests ({successful} ok)", flush=True)
+
+    # Step 2: Poll for profiler completion marker
+    deadline = _time.time() + 300
+    profiler_done = False
+    while _time.time() < deadline:
+        check = target_executor.run("test -f /tmp/profiler_all_done && echo yes", timeout=10)
+        if "yes" in check.stdout:
+            profiler_done = True
+            break
+        _time.sleep(5)
+
+    if not profiler_done:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="collect_profile", success=False, output="",
+            error=f"Profiler did not complete after {num_requests} requests. "
+                  f"Check that profiler_ranges ({profiler_config.ranges if profiler_config else '?'}) "
+                  f"are within the request count.",
+        )
+
+    _time.sleep(3)
+
+    # Step 3: Extract key_averages table from logs
+    TABLE_START = "===== begin profiler output"
+    TABLE_END = "===== end profiler output"
+
+    oc_cmd = ["oc"]
+    if kubeconfig:
+        oc_cmd += ["--kubeconfig", kubeconfig]
+    oc_cmd += ["-n", namespace or "toa-hack", "logs", pod_name]
+    log_result = subprocess.run(oc_cmd, capture_output=True, text=True, timeout=60)
+    logs = log_result.stdout if log_result.returncode == 0 else ""
+
+    tables = []
+    in_table = False
+    current: list[str] = []
+    for line in logs.splitlines():
+        stripped = re.sub(r'^\([^)]+\)\s*', '', line)
+        if TABLE_START in stripped:
+            in_table = True
+            current = []
+            continue
+        if TABLE_END in stripped:
+            in_table = False
+            tables.append("\n".join(current))
+            continue
+        if in_table:
+            current.append(stripped)
+    if in_table and current:
+        tables.append("\n".join(current))
+
+    raw_table = "\n---\n".join(tables)
+
+    # Step 4: Copy Chrome trace files
+    output_dir = f"./profiler_results/{pod_name}"
+    os.makedirs(output_dir, exist_ok=True)
+
+    list_result = target_executor.run("ls /tmp/trace_pid*.json 2>/dev/null", timeout=10)
+    trace_files = []
+    if list_result.success and list_result.stdout.strip():
+        for remote_path in list_result.stdout.strip().splitlines():
+            remote_path = remote_path.strip()
+            if not remote_path:
+                continue
+            local_name = os.path.basename(remote_path)
+            local_path = os.path.join(output_dir, local_name)
+            cp_cmd = ["oc"]
+            if kubeconfig:
+                cp_cmd += ["--kubeconfig", kubeconfig]
+            cp_cmd += ["-n", namespace or "toa-hack", "cp", f"{pod_name}:{remote_path}", local_path]
+            cp_result = subprocess.run(cp_cmd, capture_output=True, text=True, timeout=120)
+            if cp_result.returncode == 0:
+                trace_files.append(local_path)
+
+    # Step 5: Parse and summarize
+    from .analysis.trace_analyzer import summarize_table, parse_chrome_trace_file, summarize_trace_file
+
+    output_parts = [
+        f"=== PROFILING RESULTS for {pod_name} ===",
+        f"Requests sent: {num_requests} ({successful} successful)",
+        f"Profiler ranges: {profiler_config.ranges if profiler_config else 'unknown'}",
+    ]
+
+    if raw_table:
+        table_summary = summarize_table(raw_table)
+        output_parts.append(f"\n--- Key Averages Table ---\n{table_summary}")
+
+    for tf in trace_files:
+        trace_data = parse_chrome_trace_file(tf)
+        if trace_data:
+            trace_summary = summarize_trace_file(trace_data)
+            output_parts.append(f"\n--- Trace: {os.path.basename(tf)} ---\n{trace_summary}")
+
+    if not raw_table and not trace_files:
+        output_parts.append("\nNo profiler output found. Check pod logs for profiler errors.")
+
+    command_history[-1]["success"] = True
+    return ToolResult(
+        tool="collect_profile",
+        success=True,
+        output="\n".join(output_parts),
+    )
+
+
 def _handle_done(
     args: dict,
     _executor: RemoteExecutor,
@@ -1989,11 +2290,13 @@ _TOOL_HANDLERS = {
     "create_vllm_pod": _handle_create_vllm_pod,
     "delete_vllm_pod": _handle_delete_vllm_pod,
     "scrape_vllm_metrics": _handle_scrape_vllm_metrics,
+    "deploy_profiled_pod": _handle_deploy_profiled_pod,
+    "collect_profile": _handle_collect_profile,
     "done": _handle_done,
 }
 
 # Handlers that accept pod_manager as a keyword argument
-_POD_MANAGER_HANDLERS = {"create_vllm_pod", "delete_vllm_pod", "run_benchmark"}
+_POD_MANAGER_HANDLERS = {"create_vllm_pod", "delete_vllm_pod", "run_benchmark", "deploy_profiled_pod", "collect_profile"}
 
 # Handlers that accept metrics_snapshots + default_endpoint
 _METRICS_HANDLERS = {"scrape_vllm_metrics"}
@@ -2033,6 +2336,9 @@ def dispatch_tool(
         kwargs = {"pod_manager": pod_manager}
         if name == "run_benchmark":
             kwargs["baseline_pod_name"] = baseline_pod_name
+        if name == "collect_profile":
+            kwargs["namespace"] = namespace
+            kwargs["kubeconfig"] = kubeconfig
         return handler(args, executor, command_history, **kwargs)
 
     # For metrics tools, pass metrics_snapshots and default_endpoint
