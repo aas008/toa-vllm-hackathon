@@ -9,3 +9,4 @@ numpy>=1.24             # Numerical operations
 
 # Benchmark runner
 guidellm
+vllm-bench @ git+https://github.com/RohanAwhad/vllm-eval-pipeline.git

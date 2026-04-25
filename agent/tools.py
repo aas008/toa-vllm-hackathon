@@ -603,6 +603,94 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "run_eval",
+        "description": (
+            "Run a vLLM benchmark using the eval pipeline. This handles the FULL server "
+            "lifecycle: starts a fresh vLLM server with the specified config, runs warmup, "
+            "executes the workload, scrapes Prometheus metrics, and kills the server. "
+            "Results are saved as structured JSON. Use this instead of manually managing "
+            "vLLM processes. Workload profiles: throughput (concurrency=64), latency (concurrency=1), "
+            "mixed (10 req/s), long-context (concurrency=2)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "workload": {
+                    "type": "string",
+                    "enum": ["throughput", "latency", "mixed", "long-context"],
+                    "description": "Workload profile to run",
+                },
+                "tensor_parallel_size": {
+                    "type": "integer",
+                    "description": "Number of GPUs for tensor parallelism. Default: 1",
+                    "default": 1,
+                },
+                "max_num_seqs": {
+                    "type": "integer",
+                    "description": "Max concurrent sequences. Default: 128",
+                    "default": 128,
+                },
+                "gpu_memory_utilization": {
+                    "type": "number",
+                    "description": "GPU memory fraction (0.1-0.99). Default: 0.90",
+                    "default": 0.90,
+                },
+                "enforce_eager": {
+                    "type": "boolean",
+                    "description": "Disable CUDA graphs. Default: false",
+                    "default": False,
+                },
+                "enable_chunked_prefill": {
+                    "type": "boolean",
+                    "description": "Enable chunked prefill. Default: false",
+                    "default": False,
+                },
+                "duration": {
+                    "type": "integer",
+                    "description": "Measurement duration in seconds. Default: 60",
+                    "default": 60,
+                },
+                "warmup_duration": {
+                    "type": "integer",
+                    "description": "Warmup duration in seconds. Default: 15",
+                    "default": 15,
+                },
+                "port": {
+                    "type": "integer",
+                    "description": "Server port. Default: 8000",
+                    "default": 8000,
+                },
+                "cuda_devices": {
+                    "type": "string",
+                    "description": "CUDA_VISIBLE_DEVICES value (e.g. '0' or '4,5,6,7'). Default: '0'",
+                    "default": "0",
+                },
+            },
+            "required": ["workload"],
+        },
+    },
+    {
+        "name": "analyze_eval_results",
+        "description": "Analyze all eval pipeline results to find optimal configs. Shows top configs by objective and Pareto frontier.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "objective": {
+                    "type": "string",
+                    "enum": ["max_throughput", "min_latency", "balanced"],
+                    "description": "Optimization objective. Default: max_throughput",
+                    "default": "max_throughput",
+                },
+                "show_pareto": {
+                    "type": "boolean",
+                    "description": "Show Pareto frontier. Default: true",
+                    "default": True,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "done",
         "description": (
             "Signal that the tuning session is complete. Call this when you have "
@@ -1570,6 +1658,185 @@ def _handle_delete_vllm_pod(
         )
 
 
+def _handle_run_eval(
+    args: dict,
+    executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Run a vLLM benchmark via the eval pipeline on the remote GPU host.
+
+    The eval pipeline manages the full server lifecycle: start vLLM, warmup,
+    run workload, scrape metrics, kill server, save JSON results.
+    """
+    model = args["model"]
+    workload = args["workload"]
+    duration = args.get("duration", 60)
+    warmup_duration = args.get("warmup_duration", 15)
+    tp = args.get("tensor_parallel_size", 1)
+    max_num_seqs = args.get("max_num_seqs", 128)
+    gpu_mem = args.get("gpu_memory_utilization", 0.90)
+    enforce_eager = args.get("enforce_eager", False)
+    enable_chunked_prefill = args.get("enable_chunked_prefill", False)
+    port = args.get("port", 8000)
+    cuda_devices = args.get("cuda_devices", "0")
+
+    command_history.append({
+        "tool": "run_eval",
+        "workload": workload,
+        "model": model,
+        "tensor_parallel_size": tp,
+        "max_num_seqs": max_num_seqs,
+        "gpu_memory_utilization": gpu_mem,
+    })
+
+    cmd = (
+        f"cd /tmp/toa-agent-run/repo && "
+        f"CUDA_VISIBLE_DEVICES={cuda_devices} vllm-bench run "
+        f"--model {model} "
+        f"--workload {workload} "
+        f"--duration {duration} "
+        f"--warmup-duration {warmup_duration} "
+        f"--tensor-parallel-size {tp} "
+        f"--max-num-seqs {max_num_seqs} "
+        f"--gpu-memory-utilization {gpu_mem} "
+        f"--port {port} "
+        f"--output-dir results"
+    )
+    if enforce_eager:
+        cmd += " --enforce-eager"
+    if enable_chunked_prefill:
+        cmd += " --enable-chunked-prefill"
+
+    timeout = duration + warmup_duration + 300
+
+    result = executor.run(cmd, timeout=timeout)
+
+    if not result.success:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="run_eval",
+            success=False,
+            output=result.stdout,
+            error=result.stderr,
+        )
+
+    # Read the latest result JSON from the results dir
+    ls_result = executor.run(
+        "ls -t /tmp/toa-agent-run/repo/results/*.json 2>/dev/null | head -1",
+        timeout=10,
+    )
+    if not ls_result.success or not ls_result.stdout.strip():
+        command_history[-1]["success"] = True
+        return ToolResult(
+            tool="run_eval",
+            success=True,
+            output=(
+                "Eval completed but could not locate result JSON.\n"
+                f"Command output:\n{result.stdout[-3000:]}"
+            ),
+        )
+
+    result_file = ls_result.stdout.strip()
+    cat_result = executor.run(f"cat {result_file}", timeout=10)
+
+    if not cat_result.success:
+        command_history[-1]["success"] = True
+        return ToolResult(
+            tool="run_eval",
+            success=True,
+            output=(
+                f"Eval completed. Result file: {result_file}\n"
+                f"Could not read result file: {cat_result.stderr}\n"
+                f"Command output:\n{result.stdout[-3000:]}"
+            ),
+        )
+
+    # Parse and return structured results
+    try:
+        eval_data = json.loads(cat_result.stdout)
+    except json.JSONDecodeError:
+        command_history[-1]["success"] = True
+        return ToolResult(
+            tool="run_eval",
+            success=True,
+            output=(
+                f"Eval completed. Result file: {result_file}\n"
+                f"Raw JSON:\n{cat_result.stdout[:5000]}"
+            ),
+        )
+
+    metrics = eval_data.get("metrics", {})
+    config = eval_data.get("config", {})
+
+    summary_parts = [
+        "=== EVAL PIPELINE RESULTS ===",
+        f"Model: {eval_data.get('model', model)}",
+        f"Workload: {eval_data.get('workload', workload)}",
+        f"Duration: {eval_data.get('duration_seconds', 'N/A')}s",
+        f"Result file: {result_file}",
+        "",
+        "--- Config ---",
+        f"  tensor_parallel_size: {config.get('tensor_parallel_size', tp)}",
+        f"  max_num_seqs: {config.get('max_num_seqs', max_num_seqs)}",
+        f"  gpu_memory_utilization: {config.get('gpu_memory_utilization', gpu_mem)}",
+        f"  enforce_eager: {config.get('enforce_eager', enforce_eager)}",
+        f"  enable_chunked_prefill: {config.get('enable_chunked_prefill', enable_chunked_prefill)}",
+        "",
+        "--- Metrics ---",
+        f"  throughput_tps: {metrics.get('throughput_tps', 'N/A')}",
+        f"  latency_p50_ms: {metrics.get('latency_p50_ms', 'N/A')}",
+        f"  latency_p95_ms: {metrics.get('latency_p95_ms', 'N/A')}",
+        f"  latency_p99_ms: {metrics.get('latency_p99_ms', 'N/A')}",
+        f"  ttft_p50_ms: {metrics.get('ttft_p50_ms', 'N/A')}",
+        f"  ttft_p95_ms: {metrics.get('ttft_p95_ms', 'N/A')}",
+        f"  gpu_cache_usage_avg: {metrics.get('gpu_cache_usage_avg', 'N/A')}",
+        f"  gpu_memory_peak_gb: {metrics.get('gpu_memory_peak_gb', 'N/A')}",
+        "",
+        "--- Full JSON ---",
+        json.dumps(eval_data, indent=2),
+    ]
+
+    command_history[-1]["success"] = True
+    return ToolResult(
+        tool="run_eval",
+        success=True,
+        output="\n".join(summary_parts),
+    )
+
+
+def _handle_analyze_eval_results(
+    args: dict,
+    executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Run vllm-bench analyze on remote host to find optimal configs."""
+    objective = args.get("objective", "max_throughput")
+    show_pareto = args.get("show_pareto", True)
+
+    command_history.append({
+        "tool": "analyze_eval_results",
+        "objective": objective,
+        "show_pareto": show_pareto,
+    })
+
+    cmd = (
+        f"cd /tmp/toa-agent-run/repo && "
+        f"vllm-bench analyze --results-dir results --objective {objective}"
+    )
+    if show_pareto:
+        cmd += " --show-pareto"
+
+    result = executor.run(cmd, timeout=60)
+
+    command_history[-1]["success"] = result.success
+    return ToolResult(
+        tool="analyze_eval_results",
+        success=result.success,
+        output=result.stdout,
+        error=result.stderr if not result.success else None,
+    )
+
+
 def _handle_done(
     args: dict,
     _executor: RemoteExecutor,
@@ -1606,6 +1873,8 @@ _TOOL_HANDLERS = {
     "compare_benchmarks": _handle_compare_benchmarks,
     "analyze_trace": _handle_analyze_trace,
     "map_kernel": _handle_map_kernel,
+    "run_eval": _handle_run_eval,
+    "analyze_eval_results": _handle_analyze_eval_results,
     "create_vllm_pod": _handle_create_vllm_pod,
     "delete_vllm_pod": _handle_delete_vllm_pod,
     "done": _handle_done,
@@ -1724,6 +1993,8 @@ class AgentTools:
         if name == "run_benchmark":
             if "endpoint" not in args or not args.get("endpoint"):
                 args["endpoint"] = self.vllm_endpoint  # baseline default
+            args["model"] = self.model_name
+        if name == "run_eval":
             args["model"] = self.model_name
         return dispatch_tool(
             name, args, self.executor, self.command_history,
