@@ -254,13 +254,15 @@ Then proceed to profile, analyze, and tune."""
         """Execute a single tool and return result."""
         print(f"   Tool: {name}", flush=True)
 
-        # Log decision
-        self.decision_log.append({
+        # Log decision (output filled in after execution)
+        log_entry = {
             "iteration": self.state.iteration,
             "tool": name,
             "inputs": inputs,
             "timestamp": datetime.utcnow().isoformat(),
-        })
+            "output": "",
+        }
+        self.decision_log.append(log_entry)
 
         if name == "done":
             self.state.done = True
@@ -295,6 +297,8 @@ Then proceed to profile, analyze, and tune."""
             if name in ("run_command", "read_file"):
                 cmd_preview = inputs.get("command", inputs.get("path", ""))[:60]
                 print(f"      {cmd_preview}", flush=True)
+
+        log_entry["output"] = output[:4000]
 
         return {
             "type": "tool_result",
