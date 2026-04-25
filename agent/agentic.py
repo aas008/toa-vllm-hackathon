@@ -130,18 +130,22 @@ ANALYSIS GUIDELINES:
 - If OOM errors: reduce gpu-memory-utilization or max-num-seqs
 - If all requests error: check vLLM health, model loading, port-forwarding
 
-INCREMENTAL REPORTING:
-- After EVERY benchmark+read_benchmark_results cycle, call done with your findings SO FAR.
-  Include: baseline metrics, experiment metrics, comparison results, and next steps.
-- You can call done multiple times. Each call OVERWRITES the previous summary.
-  This ensures the report always reflects your latest progress.
+STOPPING CRITERIA:
+- Keep running experiments until you have had 10 CONSECUTIVE experiments with NO
+  improvement over your current best result. Only then call done.
+- Track a running count of consecutive non-improving experiments. Any experiment
+  that improves throughput OR latency (TTFT/ITL/TPOT) by more than 2% resets
+  the counter to zero.
+- Do NOT stop early just because one or two experiments didn't help. Keep exploring
+  different parameter combinations.
+- When you do call done, include ALL experiment results (not just the best one).
+
+REPORTING FORMAT:
 - Format your done summary as structured text with clear sections:
   BASELINE: <metrics from baseline benchmark>
-  EXPERIMENT <name>: <metrics and comparison vs baseline>
+  BEST CONFIGURATION: <the args and metrics of the best experiment>
+  ALL EXPERIMENTS: <table of all experiments with args and key metrics>
   FINDINGS: <what you learned>
-  NEXT STEPS: <what you'd try next if you had more iterations>
-- If you are on iteration 25+ out of 30, call done immediately with everything you have.
-  Do NOT start new experiments after iteration 25.
 
 RULES:
 - NEVER modify, kill, or restart the baseline pod
@@ -149,7 +153,7 @@ RULES:
 - ONE parameter change at a time (one experiment pod per tuning attempt)
 - ALWAYS delete experiment pods after benchmarking (call delete_vllm_pod)
 - Compare metrics before vs after each change using compare_benchmarks
-- Call done after EVERY completed benchmark cycle (partial results are fine)"""
+- Do NOT call done until you have 10 consecutive non-improving experiments"""
 
 
 class AgenticRunner:
@@ -159,7 +163,7 @@ class AgenticRunner:
         self,
         llm_client,
         tools,
-        max_iterations: int = 30,
+        max_iterations: int = 100,
         vllm_endpoint: str = "http://localhost:8000",
         model_name: str = "",
         profiles: list = None,
