@@ -152,6 +152,8 @@ class AgenticRunner:
         self.messages: list = []
         self.decision_log: list = []
         self.enable_cost_optimization = enable_cost_optimization
+        self._benchmark_called = False
+        self._nudge_sent = False
 
     def run(self) -> AgentState:
         """Run the autonomous agent loop."""
@@ -167,16 +169,22 @@ Endpoint (port-forwarded, for benchmarks): {self.vllm_endpoint}
 Model: {self.model_name}
 Profiles to benchmark: {', '.join(self.profiles)}
 
-IMPORTANT: The run_benchmark tool runs LOCALLY against the endpoint above (which is
-port-forwarded to the vLLM pod). Do NOT override the endpoint or model when calling
-run_benchmark — they are auto-filled correctly. Just specify the profile name.
+CRITICAL RULES:
+- The run_benchmark tool runs LOCALLY and the endpoint/model are AUTO-FILLED. Just specify profile.
+- Do NOT pass endpoint or model to run_benchmark. Only pass profile (e.g. profile="balanced").
+- You MUST call run_benchmark within the first 3 tool calls. No exceptions.
+- Do NOT call curl, cat logs, journalctl, or any other exploration commands before benchmarking.
 
-Start by exploring the system to understand the current configuration:
-1. Check GPU info (nvidia-smi)
-2. Check vLLM process and launch arguments
-3. Run a baseline benchmark (just call run_benchmark with profile="balanced")
+EXACT STEPS (follow this order strictly):
+1. Call run_command with command="nvidia-smi" (1 tool call)
+2. Call run_command with command="ps aux | grep vllm" (1 tool call)
+3. Call run_benchmark with profile="balanced" (THIS IS MANDATORY ON STEP 3)
+4. After getting benchmark results, analyze bottlenecks and tune vLLM parameters
+5. Re-benchmark to verify improvements
+6. Call done with a detailed summary
 
-Then proceed to profile, analyze, and tune."""
+IMPORTANT: Step 3 is NON-NEGOTIABLE. After 2 run_command calls, you MUST call run_benchmark.
+Do NOT explore further before benchmarking. The benchmark will show you where the bottlenecks are."""
             }
         ]
 
@@ -184,6 +192,22 @@ Then proceed to profile, analyze, and tune."""
         while not self.state.done and self.state.iteration < self.max_iterations:
             self.state.iteration += 1
             print(f"\n>> Iteration {self.state.iteration}/{self.max_iterations}", flush=True)
+
+            # Nudge: if we've done 3+ iterations without benchmarking, inject a reminder
+            if (self.state.iteration >= 4
+                    and not self._benchmark_called
+                    and not self._nudge_sent):
+                self._nudge_sent = True
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "STOP EXPLORING. You have spent enough iterations on system discovery. "
+                        "Call the run_benchmark tool NOW with profile=\"balanced\". "
+                        "Do NOT call run_command again until you have benchmark results. "
+                        "The endpoint and model are auto-filled — just specify the profile."
+                    ),
+                })
+                print("   [Nudge injected: forcing benchmark]", flush=True)
 
             # Call LLM with tools
             response = self._call_llm_with_tools()
@@ -263,6 +287,9 @@ Then proceed to profile, analyze, and tune."""
             "output": "",
         }
         self.decision_log.append(log_entry)
+
+        if name == "run_benchmark":
+            self._benchmark_called = True
 
         if name == "done":
             self.state.done = True
