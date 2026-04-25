@@ -277,6 +277,7 @@ def main():
         pod_manager=pod_manager,
         namespace=args.oc_namespace if args.oc_mode else None,
         kubeconfig=args.kubeconfig,
+        baseline_pod_name=args.oc_pod if args.oc_mode else None,
     )
 
     agent = AgenticRunner(
@@ -341,45 +342,17 @@ def main():
                     break
 
     # Build structured baseline/final results for the report.
-    # AgentState stores raw benchmark output per profile; convert to dicts
-    # that the reporter can use for before/after comparison.
-    #
-    # The raw output contains embedded JSON blocks from _extract_flat_metrics
-    # with keys like "output_tok/sec_mean", "ttft_p50", "itl_p50", etc.
-    # We parse those JSON blocks to get accurate numbers.
     def _parse_benchmark_output(results_dict: dict) -> list[dict]:
-        """Extract structured metrics from stored benchmark output per profile.
-
-        The output comes from run_benchmark which uses _extract_guidellm_metrics.
-        It contains human-readable lines like:
-          Output Tokens/sec: mean=627.16, median=784.57, p50=784.57, p95=868.80
-          TTFT (ms): mean=42.36, median=31.53, p50=31.53, p95=116.69, p99=120.46
-
-        We also check for embedded JSON blocks (from read_benchmark_results
-        flat metrics output) as a fallback.
-        """
+        """Extract structured metrics from stored benchmark output per profile."""
         import re
         parsed = []
         for profile, raw_output in results_dict.items():
             entry = {"profile": profile}
             if isinstance(raw_output, str):
-                # Strategy 1: Parse human-readable metric lines from
-                # _extract_guidellm_metrics output.  We want the LAST
-                # concurrency block (highest concurrency) for reporting.
-                metric_patterns = {
-                    "Output Tokens/sec": "throughput_tok_per_sec",
-                    "TTFT (ms)": None,  # handled specially
-                    "ITL (ms)": None,
-                    "TPOT (ms)": None,
-                }
-
-                # Split by concurrency blocks and use the last one
                 blocks = re.split(r'--- Concurrency: \d+', raw_output)
                 text_block = blocks[-1] if len(blocks) > 1 else raw_output
 
-                # Extract key=value pairs from metric lines
                 def _extract_kv(line):
-                    """Parse 'mean=1.23, median=4.56, p50=7.89' into dict."""
                     return dict(re.findall(r'(\w+)=([\d.]+)', line))
 
                 for line in text_block.split('\n'):
@@ -404,8 +377,6 @@ def main():
                             if p in kv and f"tpot_{p}" not in entry:
                                 entry[f"tpot_{p}"] = float(kv[p])
 
-                # Strategy 2: Fallback — look for embedded JSON blocks
-                # (from read_benchmark_results flat metrics output)
                 if "throughput_tok_per_sec" not in entry:
                     best_metrics = {}
                     for m in re.finditer(r'\{[^{}]+\}', raw_output):
@@ -433,6 +404,24 @@ def main():
     baseline_results = _parse_benchmark_output(state.baseline_results)
     final_results = _parse_benchmark_output(state.current_results)
 
+    # Collect Prometheus metric deltas from stored snapshots
+    prometheus_metrics = []
+    if tools.metrics_snapshots:
+        try:
+            from .analysis.prometheus_metrics import compute_delta
+            labels = sorted(tools.metrics_snapshots.keys())
+            pre_labels = [l for l in labels if l.startswith("pre_")]
+            for pre_label in pre_labels:
+                post_label = pre_label.replace("pre_", "post_", 1)
+                if post_label in tools.metrics_snapshots:
+                    delta = compute_delta(
+                        tools.metrics_snapshots[pre_label],
+                        tools.metrics_snapshots[post_label],
+                    )
+                    prometheus_metrics.append(delta.to_dict())
+        except Exception:
+            pass
+
     report = TuningReport(
         timestamp=datetime.utcnow().strftime("%Y%m%d_%H%M%S"),
         model_name=args.model,
@@ -445,6 +434,7 @@ def main():
         kernel_analysis=state.kernel_analysis,
         token_usage=llm.get_usage_data(),
         decision_log=agent.get_decision_log(),
+        prometheus_metrics=prometheus_metrics,
     )
 
     reporter = Reporter(output_dir=args.output)

@@ -20,6 +20,7 @@ class AgentState:
     current_results: dict = field(default_factory=dict)
     actions_taken: list = field(default_factory=list)
     kernel_analysis: dict = field(default_factory=dict)
+    prometheus_metrics: list = field(default_factory=list)
     done: bool = False
     success: bool = False
     summary: str = ""
@@ -36,26 +37,37 @@ ENVIRONMENT:
   `uv run python script.py`. Do NOT use raw pip or conda for installing packages.
 
 TOOLS AVAILABLE:
-- run_command: Execute shell commands on the vLLM pod/host (runs REMOTELY on pod)
-- read_file: Read files from the vLLM pod/host (runs REMOTELY on pod)
-- write_file: Write files to the vLLM pod/host (runs REMOTELY on pod)
-- run_benchmark: Run GuideLLM benchmark (runs LOCALLY, hits the port-forwarded endpoint)
-- fetch_vllm_logs: Fetch + parse vLLM logs from pod with 120+ regex patterns (runs REMOTELY)
-- read_benchmark_results: Read a GuideLLM JSON file and extract structured metrics (runs LOCALLY)
-- compare_benchmarks: Compare two benchmark JSON files to detect regressions (runs LOCALLY)
-- analyze_trace: Analyze a PyTorch profiler Chrome trace JSON (runs LOCALLY)
-- map_kernel: Map a CUDA kernel name to its source and category (runs LOCALLY)
-- create_vllm_pod: Create an experiment pod with extra vLLM args (returns pod_name + endpoint)
-- delete_vllm_pod: Delete an experiment pod and clean up port-forward
-- done: Signal completion with summary
+- run_command(command, timeout=60, pod_name=None): Execute shell on vLLM pod
+- read_file(path): Read file from vLLM pod
+- write_file(path, content): Write file to vLLM pod
+- run_benchmark(profile, endpoint=None, concurrency="1,50", max_seconds=30):
+    Launch GuideLLM benchmark pod on cluster. Auto-scrapes Prometheus /metrics
+    before and after — delta appended to output. Returns JSON path + metrics.
+- scrape_vllm_metrics(endpoint=None, label=None, compare_with=None):
+    Scrape vLLM /metrics endpoint. Stores snapshot by label.
+    Pass compare_with=<previous_label> to compute delta between two snapshots.
+    Returns: gauges (kv_cache_usage_perc, num_requests_running/waiting),
+    counters (prompt/generation_tokens_total, num_preemptions_total,
+    request_success_total, prefix_cache_hits/queries_total),
+    histograms (time_to_first_token_seconds, inter_token_latency_seconds,
+    e2e_request_latency_seconds, request_queue/prefill/decode_time_seconds)
+- fetch_vllm_logs(log_source="process", tail_lines=200, pod_name=None):
+    Fetch + parse vLLM logs with 120+ regex patterns
+- read_benchmark_results(results_path): Parse GuideLLM JSON, extract metrics
+- compare_benchmarks(baseline_path, current_path, threshold=0.02): Detect regressions
+- analyze_trace(trace_json_path, top_n=20): Parse PyTorch profiler Chrome trace
+- map_kernel(kernel_name): Map CUDA kernel to source and category
+- create_vllm_pod(vllm_args): Create experiment pod, returns (pod_name, endpoint)
+- delete_vllm_pod(pod_name): Delete experiment pod + port-forward cleanup
+- done(summary, success): Signal completion
 
 ARCHITECTURE:
 - The BASELINE pod is running and port-forwarded. It is NEVER modified or restarted.
 - For each tuning experiment, create a NEW pod with create_vllm_pod.
 - run_command/read_file/write_file/fetch_vllm_logs execute INSIDE a pod.
   Pass pod_name to target an experiment pod; omit to target the baseline pod.
-- run_benchmark runs LOCALLY. Pass endpoint from create_vllm_pod to benchmark
-  an experiment pod; omit endpoint to benchmark the baseline.
+- run_benchmark launches a GuideLLM pod on the cluster. Pass endpoint from
+  create_vllm_pod to benchmark an experiment pod; omit to benchmark the baseline.
 - run_benchmark model is AUTO-FILLED — just specify the profile name (and endpoint if experiment).
 
 TUNING WORKFLOW (follow this order strictly):
@@ -98,7 +110,7 @@ TUNING WORKFLOW (follow this order strictly):
 4. Call done with all comparison results when finished.
 
 MANDATORY WORKFLOW FOR EACH BENCHMARK CYCLE:
-After EVERY run_benchmark call, you MUST do BOTH of these before making any decisions:
+After EVERY run_benchmark call, you MUST do ALL of these before making any decisions:
 
 1. CALL fetch_vllm_logs (with pod_name if experiment pod): This parses the vLLM
    server logs and returns structured data: server config (model, non-default args),
@@ -109,6 +121,25 @@ After EVERY run_benchmark call, you MUST do BOTH of these before making any deci
 2. CALL read_benchmark_results with the JSON path from run_benchmark output:
    This returns structured per-concurrency metrics: success rate, throughput,
    TTFT, ITL, TPOT with P50/P95/P99 percentiles.
+
+3. READ THE PROMETHEUS METRICS DELTA in the run_benchmark output. Every benchmark
+   auto-scrapes vLLM's /metrics endpoint before and after the run. The delta is
+   appended to the benchmark output and contains:
+   - Gauges: kv_cache_usage_perc, num_requests_running, num_requests_waiting
+   - Counter deltas: prompt_tokens_total, generation_tokens_total,
+     num_preemptions_total, request_success_total, prefix_cache_hits_total
+   - Histograms (server-side, complementing GuideLLM client-side):
+     time_to_first_token_seconds, inter_token_latency_seconds,
+     e2e_request_latency_seconds, request_queue_time_seconds,
+     request_prefill_time_seconds, request_decode_time_seconds
+
+   USE THESE METRICS to make tuning decisions. They show what happened INSIDE
+   vLLM during the benchmark, not just what the client observed.
+
+4. For deeper investigation, call scrape_vllm_metrics directly:
+   - scrape_vllm_metrics(label="pre_experiment1") before a benchmark
+   - scrape_vllm_metrics(label="post_experiment1", compare_with="pre_experiment1") after
+   This gives you full control over snapshot timing and cross-experiment comparison.
 
 AFTER TUNING, use compare_benchmarks:
    Pass the baseline JSON path and the post-tuning JSON path to get a side-by-side
@@ -164,6 +195,21 @@ ANALYSIS GUIDELINES:
 - If OOM errors: reduce gpu-memory-utilization or max-num-seqs, or try
   --kv-cache-dtype fp8 to reduce cache memory
 - If all requests error: check vLLM health, model loading, port-forwarding
+
+PROMETHEUS-DRIVEN ANALYSIS (use the auto-scraped delta from run_benchmark output):
+- kv_cache_usage_perc near 1.0 → KV cache full. Try: increase gpu-memory-utilization,
+  reduce max-num-seqs, or enable chunked-prefill to limit batch memory
+- num_preemptions_total delta > 0 → scheduler evicting sequences to fit new ones.
+  This causes re-computation and hurts latency. Reduce max-num-seqs or increase cache
+- num_requests_waiting stays high → requests queuing faster than served. Throughput bottleneck.
+  Check if decode or prefill is the bottleneck using request_prefill_time vs request_decode_time
+- request_queue_time_seconds p95 growing → scheduling delay. Check max-num-seqs
+- prefix_cache_hits_total / prefix_cache_queries_total = hit rate.
+  Low hit rate with prefix-caching enabled → workload has no repeated prefixes, disable it
+- Compare server-side TTFT (time_to_first_token_seconds from Prometheus) with client-side
+  TTFT (from GuideLLM). Large gap = network/queuing overhead
+- generation_tokens_total delta / duration = server-side token throughput. Compare with
+  GuideLLM's output_tokens_per_second to verify consistency
 
 STOPPING CRITERIA:
 - Keep running experiments until you have had 10 CONSECUTIVE experiments with NO
@@ -421,12 +467,14 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
                 cmd_preview = inputs.get("command", inputs.get("path", ""))[:60]
                 print(f"      {cmd_preview}", flush=True)
 
-        log_entry["output"] = output[:4000]
+        log_entry["output"] = output[:6000]
 
+        # Benchmark output includes Prometheus delta — give it more room
+        max_content = 16000 if name == "run_benchmark" else 8000
         return {
             "type": "tool_result",
             "tool_use_id": tool_use_id,
-            "content": output[:8000],  # Truncate long outputs
+            "content": output[:max_content],
         }
 
     def _add_assistant_message(self, response):
