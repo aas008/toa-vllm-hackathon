@@ -146,6 +146,11 @@ class AgenticRunner:
         """Run the autonomous agent loop."""
         print(">> Starting vLLM performance tuning agent...", flush=True)
 
+        # Extract port from vllm_endpoint URL
+        from urllib.parse import urlparse
+        _parsed = urlparse(self.vllm_endpoint)
+        _port = _parsed.port or 8000
+
         # Initialize conversation
         self.messages = [
             {
@@ -155,15 +160,18 @@ class AgenticRunner:
 Model: {self.model_name}
 Profiles to benchmark: {', '.join(self.profiles)}
 
+IMPORTANT: Use port={_port} and cuda_devices="2" for ALL run_eval calls.
+Port 8000 and GPUs 0-1 are occupied by another process.
+
 EXACT STEPS (follow this order strictly):
 
 Phase 1 — Baseline:
 1. Call run_command with command="nvidia-smi" (1 tool call)
-2. Call run_eval with workload="throughput" (baseline with default config)
+2. Call run_eval with workload="throughput", port={_port}, cuda_devices="2" (baseline with default config)
 3. Note baseline metrics
 
 Phase 2 — Experiments:
-4. Call run_eval with modified params (e.g. enable_chunked_prefill=true)
+4. Call run_eval with modified params (e.g. enable_chunked_prefill=true), always with port={_port}, cuda_devices="2"
 5. Compare against baseline
 6. Repeat with different params
 
