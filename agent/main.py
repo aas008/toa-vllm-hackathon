@@ -8,6 +8,9 @@ import sys
 
 from .llm import ClaudeClient, get_model_id
 from .ssh_client import SSHClient
+from .agentic import AgenticRunner
+from .tools import AgentTools, OcExecutor, SSHExecutor
+from .reporter import Reporter, TuningReport
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -44,8 +47,8 @@ Available Claude models: sonnet (default), opus, haiku
     )
     parser.add_argument(
         "--vllm-host",
-        required=True,
-        help="SSH hostname for the GPU node running vLLM"
+        default=None,
+        help="SSH hostname for the GPU node running vLLM (required for SSH mode)"
     )
     parser.add_argument(
         "--model",
@@ -89,6 +92,29 @@ Available Claude models: sonnet (default), opus, haiku
         "--verbose", "-v",
         action="store_true",
         help="Verbose output"
+    )
+
+    # Execution mode: SSH or oc exec
+    parser.add_argument(
+        "--oc-mode",
+        action="store_true",
+        default=False,
+        help="Use 'oc exec' instead of SSH to reach the vLLM pod"
+    )
+    parser.add_argument(
+        "--oc-namespace",
+        default="toa-hack",
+        help="OpenShift namespace for oc exec (default: toa-hack)"
+    )
+    parser.add_argument(
+        "--oc-pod",
+        default=None,
+        help="Pod name for oc exec (required if --oc-mode)"
+    )
+    parser.add_argument(
+        "--kubeconfig",
+        default=os.environ.get("KUBECONFIG"),
+        help="Path to kubeconfig file (default: $KUBECONFIG)"
     )
 
     # Vertex AI options
@@ -156,13 +182,36 @@ def main():
     print(f"Profiles:       {', '.join(args.profiles)}")
     print(f"Output Dir:     {args.output}")
 
-    # Test SSH connectivity
-    print_step("Testing SSH connectivity to vLLM host...")
-    ssh = SSHClient(args.vllm_host, user=args.ssh_user)
-    if not ssh.test_connection():
-        print(f"Error: Cannot connect to vLLM host ({args.vllm_host})")
+    # Validate mode-specific args
+    if not args.oc_mode and not args.vllm_host:
+        print("Error: --vllm-host is required for SSH mode. Use --oc-mode for OpenShift.")
         sys.exit(1)
-    print(f"  SSH to {args.vllm_host}: OK")
+
+    # Set up remote executor (SSH or oc exec)
+    if args.oc_mode:
+        if not args.oc_pod:
+            print("Error: --oc-pod is required when using --oc-mode")
+            sys.exit(1)
+        print_step(f"Using oc exec mode: {args.oc_namespace}/{args.oc_pod}")
+        executor = OcExecutor(
+            namespace=args.oc_namespace,
+            pod_name=args.oc_pod,
+            kubeconfig=args.kubeconfig,
+        )
+        # Test connectivity
+        test_result = executor.run("echo OK")
+        if test_result.get("error"):
+            print(f"Error: Cannot connect to pod: {test_result['error']}")
+            sys.exit(1)
+        print(f"  oc exec to {args.oc_pod}: OK")
+    else:
+        print_step("Testing SSH connectivity to vLLM host...")
+        ssh = SSHClient(args.vllm_host, user=args.ssh_user)
+        if not ssh.test_connection():
+            print(f"Error: Cannot connect to vLLM host ({args.vllm_host})")
+            sys.exit(1)
+        print(f"  SSH to {args.vllm_host}: OK")
+        executor = SSHExecutor(ssh)
 
     # Test Claude API connectivity
     print_step(f"Testing Claude API connectivity ({backend})...")
@@ -192,8 +241,48 @@ def main():
     print(f"\n  Token usage so far:")
     print(f"  {llm.get_usage_report()}")
 
-    # TODO: Step 4 — Wire up AgenticRunner with vLLM tools and system prompt
-    print_step("Agent loop not yet implemented (Step 4). Exiting.")
+    # Create tools and agent
+    tools = AgentTools(executor=executor)
+
+    agent = AgenticRunner(
+        llm_client=llm,
+        tools=tools,
+        max_iterations=args.max_iterations,
+        vllm_endpoint=args.vllm_endpoint,
+        model_name=args.model,
+        profiles=args.profiles,
+    )
+
+    # Run the agent loop
+    print_step("Starting agent loop...")
+    state = agent.run()
+
+    # Generate report
+    print_step("Generating report...")
+    from datetime import datetime
+    report = TuningReport(
+        timestamp=datetime.utcnow().strftime("%Y%m%d_%H%M%S"),
+        model_name=args.model,
+        vllm_endpoint=args.vllm_endpoint,
+        agent_summary=state.summary,
+        actions_taken=state.actions_taken,
+        kernel_analysis=state.kernel_analysis,
+        token_usage=llm.get_usage_report(),
+        decision_log=agent.get_decision_log(),
+    )
+
+    reporter = Reporter(output_dir=args.output)
+    md_path, json_path = reporter.generate(report)
+    print(f"  Markdown report: {md_path}")
+    print(f"  JSON report:     {json_path}")
+
+    # Final summary
+    print_header("Agent Complete")
+    print(f"  Success: {state.success}")
+    print(f"  Iterations: {state.iteration}")
+    print(f"  Summary: {state.summary[:200]}")
+    print(f"\n  Token usage:")
+    print(f"  {llm.get_usage_report()}")
 
 
 if __name__ == "__main__":
