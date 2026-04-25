@@ -1690,9 +1690,8 @@ def _handle_run_eval(
     })
 
     cmd = (
-        f"source /home/lab/.conda/etc/profile.d/conda.sh && conda activate vllm && "
         f"cd /tmp/vllm-eval-pipeline && "
-        f"CUDA_VISIBLE_DEVICES={cuda_devices} python -m src run "
+        f"CUDA_VISIBLE_DEVICES={cuda_devices} uv run python -m src run "
         f"--model {model} "
         f"--workload {workload} "
         f"--duration {duration} "
@@ -1821,9 +1820,8 @@ def _handle_analyze_eval_results(
     })
 
     cmd = (
-        f"source /home/lab/.conda/etc/profile.d/conda.sh && conda activate vllm && "
         f"cd /tmp/vllm-eval-pipeline && "
-        f"python -m src analyze --results-dir /tmp/vllm-eval-results --objective {objective}"
+        f"uv run python -m src analyze --results-dir /tmp/vllm-eval-results --objective {objective}"
     )
     if show_pareto:
         cmd += " --show-pareto"
