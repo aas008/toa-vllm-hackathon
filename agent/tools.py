@@ -41,6 +41,7 @@ Dispatch:
 from __future__ import annotations
 
 import json
+import sys
 import subprocess
 import shlex
 from abc import ABC, abstractmethod
@@ -245,28 +246,25 @@ BENCHMARK_PROFILES = {
         "isl": 1000,
         "osl": 1000,
         "description": "Balanced workload (ISL=1000, OSL=1000)",
-        "data_flag": "prompt_tokens=1000,output_tokens=1000",
+        "data_flag": '{"prompt_tokens": 1000, "output_tokens": 1000, "samples": 1000}',
     },
     "decode_heavy": {
         "isl": 512,
         "osl": 2048,
         "description": "Decode-heavy workload (ISL=512, OSL=2048)",
-        "data_flag": (
-            "prompt_tokens=512,prompt_tokens_stdev=128,"
-            "output_tokens=2048,output_tokens_stdev=512"
-        ),
+        "data_flag": '{"prompt_tokens": 512, "output_tokens": 2048, "samples": 1000}',
     },
     "prefill_heavy": {
         "isl": 2048,
         "osl": 128,
         "description": "Prefill-heavy workload (ISL=2048, OSL=128)",
-        "data_flag": "prompt_tokens=2048,output_tokens=128",
+        "data_flag": '{"prompt_tokens": 2048, "output_tokens": 128, "samples": 1000}',
     },
     "long_context": {
         "isl": 8000,
         "osl": 1000,
         "description": "Long-context workload (ISL=8000, OSL=1000)",
-        "data_flag": "prompt_tokens=8000,output_tokens=1000",
+        "data_flag": '{"prompt_tokens": 8000, "output_tokens": 1000, "samples": 1000}',
     },
 }
 
@@ -377,13 +375,12 @@ TOOL_DEFINITIONS: list[dict] = [
                 "endpoint": {
                     "type": "string",
                     "description": (
-                        "vLLM endpoint URL (e.g. http://localhost:8000). "
-                        "For OpenShift, use the port-forwarded or route URL."
+                        "vLLM endpoint URL. Auto-filled from CLI args if omitted."
                     ),
                 },
                 "model": {
                     "type": "string",
-                    "description": "Model name served by vLLM (e.g. meta-llama/Llama-3.1-8B)",
+                    "description": "Model name served by vLLM. Auto-filled from CLI args if omitted.",
                 },
                 "max_seconds": {
                     "type": "integer",
@@ -398,7 +395,7 @@ TOOL_DEFINITIONS: list[dict] = [
                     ),
                 },
             },
-            "required": ["profile", "endpoint", "model"],
+            "required": ["profile"],
         },
     },
     {
@@ -594,24 +591,28 @@ def _handle_run_benchmark(
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     # Build GuideLLM command (runs locally, targets the vLLM endpoint)
-    # Ensure endpoint ends with /v1 for OpenAI-compatible API
+    # Target URL must end with /v1 for OpenAI-compatible API
     target_url = endpoint.rstrip("/")
     if not target_url.endswith("/v1"):
         target_url += "/v1"
 
+    # Derive HuggingFace processor name from model path
+    # e.g. "/models/facebook/opt-125m" -> "facebook/opt-125m"
+    processor = args.get("processor", model)
+    if processor.startswith("/models/"):
+        processor = processor[len("/models/"):]
+
     guidellm_cmd = [
-        "guidellm", "benchmark",
+        sys.executable, "-m", "guidellm", "benchmark", "run",
         f"--target={target_url}",
-        "--backend-type=openai_http",
         f"--model={model}",
-        "--rate-type=concurrent",
-        f"--processor={model}",
-        "--max-concurrency=1000",
-        "--request-timeout=1000",
-        f"--data={profile['data_flag']}",
+        f"--processor={processor}",
+        f"--rate-type=concurrent",
         f"--max-seconds={max_seconds}",
         f"--rate={concurrency}",
         f"--output-path={output_path}",
+        "--processor-args", '{"trust-remote-code":"true"}',
+        "--data", profile["data_flag"],
     ]
 
     command_str = " ".join(guidellm_cmd)
@@ -999,8 +1000,15 @@ class AgentTools:
     AgentTools, but backed by the RemoteExecutor abstraction.
     """
 
-    def __init__(self, executor: RemoteExecutor):
+    def __init__(
+        self,
+        executor: RemoteExecutor,
+        vllm_endpoint: str = "http://localhost:8000",
+        model_name: str = "",
+    ):
         self.executor = executor
+        self.vllm_endpoint = vllm_endpoint
+        self.model_name = model_name
         self.command_history: list[dict] = []
 
     def get_tool_definitions(self) -> list[dict]:
@@ -1008,7 +1016,13 @@ class AgentTools:
         return TOOL_DEFINITIONS
 
     def dispatch(self, name: str, args: dict) -> ToolResult:
-        """Dispatch a tool call, tracking history on this instance."""
+        """Dispatch a tool call, tracking history on this instance.
+
+        For run_benchmark, auto-fills endpoint and model if not provided.
+        """
+        if name == "run_benchmark":
+            args.setdefault("endpoint", self.vllm_endpoint)
+            args.setdefault("model", self.model_name)
         return dispatch_tool(name, args, self.executor, self.command_history)
 
     # Convenience methods for direct (non-agent) use

@@ -177,6 +177,19 @@ class ClaudeClient:
         """Get token usage summary for all models."""
         return [usage.to_dict() for usage in self.usage.values()]
 
+    def get_usage_data(self) -> list:
+        """Return token usage as a list of dicts for structured reporting."""
+        data = []
+        for usage in self.usage.values():
+            data.append({
+                "model": usage.model,
+                "input_tokens": usage.input_tokens,
+                "output_tokens": usage.output_tokens,
+                "api_calls": usage.calls,
+                "cost_usd": usage.cost(),
+            })
+        return data
+
     def get_usage_report(self) -> str:
         """Generate a markdown table of token usage with cost."""
         lines = ["| Model | Input Tokens | Output Tokens | Total | API Calls | Cost (USD) |",

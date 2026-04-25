@@ -200,8 +200,8 @@ def main():
         )
         # Test connectivity
         test_result = executor.run("echo OK")
-        if test_result.get("error"):
-            print(f"Error: Cannot connect to pod: {test_result['error']}")
+        if not test_result.success:
+            print(f"Error: Cannot connect to pod: {test_result.stderr}")
             sys.exit(1)
         print(f"  oc exec to {args.oc_pod}: OK")
     else:
@@ -242,7 +242,11 @@ def main():
     print(f"  {llm.get_usage_report()}")
 
     # Create tools and agent
-    tools = AgentTools(executor=executor)
+    tools = AgentTools(
+        executor=executor,
+        vllm_endpoint=args.vllm_endpoint,
+        model_name=args.model,
+    )
 
     agent = AgenticRunner(
         llm_client=llm,
@@ -267,7 +271,7 @@ def main():
         agent_summary=state.summary,
         actions_taken=state.actions_taken,
         kernel_analysis=state.kernel_analysis,
-        token_usage=llm.get_usage_report(),
+        token_usage=llm.get_usage_data(),
         decision_log=agent.get_decision_log(),
     )
 
