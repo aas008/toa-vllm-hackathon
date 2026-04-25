@@ -448,6 +448,103 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "fetch_vllm_logs",
+        "description": (
+            "Fetch and parse vLLM server logs from the pod. Runs REMOTELY on the pod "
+            "to collect log output, then parses it with 120+ regex patterns to extract "
+            "structured information: server config (vLLM version, non-default args), "
+            "engine config (dtype, quantization, TP/PP, CUDA graphs, chunked prefill), "
+            "compilation (attention backend, torch.compile time, CUDA graph capture), "
+            "memory (model memory, KV cache size, weights load time), "
+            "timing (engine init time), and warnings/errors. "
+            "IMPORTANT: Call this AFTER every benchmark to understand the server state."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "log_source": {
+                    "type": "string",
+                    "description": (
+                        "How to collect logs. Options: "
+                        "'process' (default) reads /proc/1/fd/1 for stdout of vLLM process, "
+                        "'file' reads a specific log file path, "
+                        "'dmesg' reads kernel messages for OOM/GPU errors."
+                    ),
+                    "enum": ["process", "file", "dmesg"],
+                    "default": "process",
+                },
+                "log_path": {
+                    "type": "string",
+                    "description": (
+                        "Path to log file on the pod (only used when log_source='file'). "
+                        "Default: /tmp/vllm.log"
+                    ),
+                },
+                "tail_lines": {
+                    "type": "integer",
+                    "description": "Number of recent log lines to fetch. Default: 200",
+                    "default": 200,
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "read_benchmark_results",
+        "description": (
+            "Read and parse a GuideLLM benchmark results JSON file from a previous "
+            "run_benchmark call. Returns structured metrics per concurrency level: "
+            "request totals (successful/errored), output tokens/sec, TTFT, ITL, TPOT "
+            "with P50/P95/P99 percentiles, and request latency. "
+            "Use this to review detailed metrics from a completed benchmark. "
+            "The file path is shown in run_benchmark output as 'Results saved to: ...'."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "results_path": {
+                    "type": "string",
+                    "description": "Path to the GuideLLM JSON results file (local path).",
+                },
+            },
+            "required": ["results_path"],
+        },
+    },
+    {
+        "name": "compare_benchmarks",
+        "description": (
+            "Compare two benchmark runs to detect performance regressions or improvements. "
+            "Takes paths to two GuideLLM JSON result files (baseline and current), "
+            "extracts key metrics from each, and compares them with a configurable "
+            "threshold (default 2%). Reports per-metric changes with direction "
+            "(improvement/regression/neutral), accounting for metric directionality "
+            "(higher throughput = better, lower latency = better). "
+            "Use this after applying a tuning change to verify the impact."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "baseline_path": {
+                    "type": "string",
+                    "description": "Path to the baseline GuideLLM JSON results file.",
+                },
+                "current_path": {
+                    "type": "string",
+                    "description": "Path to the current (post-tuning) GuideLLM JSON results file.",
+                },
+                "threshold": {
+                    "type": "number",
+                    "description": (
+                        "Threshold for flagging a change as regression/improvement, "
+                        "as a fraction (e.g. 0.02 = 2%). Default: 0.02"
+                    ),
+                    "default": 0.02,
+                },
+            },
+            "required": ["baseline_path", "current_path"],
+        },
+    },
+    {
         "name": "done",
         "description": (
             "Signal that the tuning session is complete. Call this when you have "
@@ -555,6 +652,76 @@ def _handle_write_file(
     )
 
 
+def _extract_guidellm_metrics(bench_data: dict) -> str:
+    """Extract structured metrics from GuideLLM JSON output.
+
+    Returns a human-readable summary of key performance metrics from each
+    benchmark run (one per concurrency level).
+    """
+    lines = ["=== GUIDELLM METRICS SUMMARY ==="]
+
+    benchmarks = bench_data.get("benchmarks", [])
+    if not benchmarks:
+        return "No benchmark data found in JSON output."
+
+    for i, bench in enumerate(benchmarks):
+        config = bench.get("config", {})
+        strategy = config.get("strategy", {})
+        conc = strategy.get("max_concurrency", strategy.get("worker_count", "?"))
+        lines.append(f"\n--- Concurrency: {conc} ---")
+
+        metrics = bench.get("metrics", {})
+
+        # Request totals
+        totals = metrics.get("request_totals", {})
+        successful = totals.get("successful", 0)
+        errored = totals.get("errored", 0)
+        total = totals.get("total", 0)
+        lines.append(f"  Requests: {successful} successful, {errored} errored, {total} total")
+        if total > 0:
+            lines.append(f"  Success Rate: {successful / total * 100:.1f}%")
+
+        if successful == 0:
+            lines.append("  WARNING: No successful requests — metrics below will be zeros.")
+            lines.append("  → Check vLLM logs for errors (model loading, OOM, etc.)")
+
+        # Throughput
+        def _stat_line(label, stat_dict, keys=("mean", "median")):
+            """Format a statistics dict into a readable line."""
+            if not stat_dict:
+                return f"  {label}: N/A"
+            # Look for 'successful' sub-dict first (GuideLLM v0.5 format)
+            d = stat_dict.get("successful", stat_dict)
+            parts = []
+            for k in keys:
+                v = d.get(k)
+                if v is not None:
+                    parts.append(f"{k}={v:.2f}")
+            # Add percentiles if present
+            pcts = d.get("percentiles", {})
+            for p in ("p50", "p95", "p99"):
+                v = pcts.get(p)
+                if v is not None:
+                    parts.append(f"{p}={v:.2f}")
+            return f"  {label}: {', '.join(parts)}" if parts else f"  {label}: N/A"
+
+        lines.append(_stat_line("Output Tokens/sec", metrics.get("output_tokens_per_second")))
+        lines.append(_stat_line("Prompt Tokens/sec", metrics.get("prompt_tokens_per_second")))
+        lines.append(_stat_line("Total Tokens/sec", metrics.get("tokens_per_second")))
+        lines.append(_stat_line("TTFT (ms)", metrics.get("time_to_first_token_ms")))
+        lines.append(_stat_line("ITL (ms)", metrics.get("inter_token_latency_ms")))
+        lines.append(_stat_line("TPOT (ms)", metrics.get("time_per_output_token_ms")))
+        lines.append(_stat_line("Request Latency (s)", metrics.get("request_latency")))
+        lines.append(_stat_line("Requests/sec", metrics.get("requests_per_second")))
+
+        # Duration
+        duration = bench.get("duration")
+        if duration is not None:
+            lines.append(f"  Duration: {duration:.1f}s")
+
+    return "\n".join(lines)
+
+
 def _handle_run_benchmark(
     args: dict,
     _executor: RemoteExecutor,
@@ -645,21 +812,23 @@ def _handle_run_benchmark(
                 f"Concurrency levels: {concurrency}",
                 f"Max seconds per level: {max_seconds}",
                 f"Results saved to: {output_path}",
-                "",
-                "--- GuideLLM stdout ---",
-                stdout[-4000:] if len(stdout) > 4000 else stdout,
             ]
 
-            # Attempt to parse the output JSON for a quick summary
+            # Parse GuideLLM JSON and extract structured metrics
             if os.path.exists(output_path):
                 try:
                     with open(output_path, "r") as f:
                         bench_data = json.load(f)
+                    metrics_summary = _extract_guidellm_metrics(bench_data)
                     summary_parts.append("")
-                    summary_parts.append("--- Results JSON loaded successfully ---")
-                    summary_parts.append(f"Keys: {list(bench_data.keys()) if isinstance(bench_data, dict) else 'array'}")
-                except (json.JSONDecodeError, OSError):
-                    summary_parts.append("(Could not parse results JSON)")
+                    summary_parts.append(metrics_summary)
+                except (json.JSONDecodeError, OSError) as e:
+                    summary_parts.append(f"(Could not parse results JSON: {e})")
+
+            # Append last 2000 chars of stdout for context
+            summary_parts.append("")
+            summary_parts.append("--- GuideLLM stdout (last 2000 chars) ---")
+            summary_parts.append(stdout[-2000:] if len(stdout) > 2000 else stdout)
 
             output_text = "\n".join(summary_parts)
         else:
@@ -912,6 +1081,343 @@ def _fallback_kernel_mapping(kernel_name: str) -> dict:
     }
 
 
+def _handle_fetch_vllm_logs(
+    args: dict,
+    executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Fetch vLLM logs from the pod and parse them into structured data.
+
+    Runs remotely on the pod to collect log text, then applies the vLLM log
+    parser (120+ regex patterns) to extract server config, engine config,
+    compilation, memory, timing, and warnings.
+    """
+    log_source = args.get("log_source", "process")
+    tail_lines = args.get("tail_lines", 200)
+
+    command_history.append({
+        "tool": "fetch_vllm_logs",
+        "log_source": log_source,
+        "tail_lines": tail_lines,
+    })
+
+    # Build the command to fetch logs from the pod
+    if log_source == "file":
+        log_path = args.get("log_path", "/tmp/vllm.log")
+        cmd = f"tail -{tail_lines} {log_path} 2>/dev/null || echo 'Log file not found: {log_path}'"
+    elif log_source == "dmesg":
+        cmd = f"dmesg | tail -{tail_lines} 2>/dev/null || echo 'dmesg not available'"
+    else:
+        # Default: try multiple log sources
+        cmd = (
+            f"(cat /proc/1/fd/1 2>/dev/null | tail -{tail_lines}) || "
+            f"(tail -{tail_lines} /tmp/vllm*.log 2>/dev/null) || "
+            f"(journalctl -u vllm --no-pager -n {tail_lines} 2>/dev/null) || "
+            f"echo 'No vLLM logs found. Try log_source=file with a specific path.'"
+        )
+
+    result = executor.run(cmd, timeout=30)
+
+    if not result.success:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="fetch_vllm_logs",
+            success=False,
+            output="",
+            error=f"Failed to fetch logs: {result.stderr}",
+        )
+
+    raw_logs = result.stdout
+
+    # Also fetch current vLLM launch args
+    cmdline_result = executor.run("cat /proc/1/cmdline 2>/dev/null | tr '\\0' ' '", timeout=10)
+    cmdline = cmdline_result.stdout.strip() if cmdline_result.success else ""
+
+    # Parse logs with the structured parser
+    try:
+        from .analysis.vllm_log_parser import parse_vllm_log
+        parsed = parse_vllm_log(raw_logs)
+    except Exception as e:
+        parsed = {"parse_error": str(e)}
+
+    # Add cmdline to parsed result
+    if cmdline:
+        parsed.setdefault("server_config", {})["cmdline"] = cmdline
+
+    # Build output
+    output_parts = ["=== PARSED VLLM LOG ANALYSIS ==="]
+
+    for section, data in parsed.items():
+        if section == "warnings_errors":
+            if data:
+                output_parts.append(f"\n--- Warnings/Errors ({len(data)} found) ---")
+                for w in data[:20]:  # Limit to 20
+                    output_parts.append(f"  {w[:200]}")
+        elif isinstance(data, dict):
+            output_parts.append(f"\n--- {section.replace('_', ' ').title()} ---")
+            for k, v in data.items():
+                if k == "non_default_args" and isinstance(v, dict):
+                    output_parts.append(f"  {k}:")
+                    for ak, av in v.items():
+                        output_parts.append(f"    {ak}: {av}")
+                else:
+                    output_parts.append(f"  {k}: {v}")
+
+    output_parts.append(f"\n--- Raw Log Tail ({min(tail_lines, len(raw_logs.splitlines()))} lines) ---")
+    # Include last 50 lines of raw logs for context
+    raw_tail = "\n".join(raw_logs.splitlines()[-50:])
+    output_parts.append(raw_tail)
+
+    output_text = "\n".join(output_parts)
+    command_history[-1]["success"] = True
+    command_history[-1]["parsed_sections"] = list(parsed.keys())
+
+    return ToolResult(
+        tool="fetch_vllm_logs",
+        success=True,
+        output=output_text,
+    )
+
+
+def _extract_flat_metrics(bench_data: dict) -> list[dict]:
+    """Extract flat metric dicts per concurrency level from GuideLLM JSON.
+
+    Returns a list of dicts, one per benchmark (concurrency level), with
+    flat key-value pairs suitable for comparison.
+    """
+    results = []
+    benchmarks = bench_data.get("benchmarks", [])
+
+    for bench in benchmarks:
+        config = bench.get("config", {})
+        strategy = config.get("strategy", {})
+        conc = strategy.get("max_concurrency", strategy.get("worker_count", 0))
+        metrics = bench.get("metrics", {})
+
+        flat: dict = {"concurrency": conc}
+
+        # Request totals
+        totals = metrics.get("request_totals", {})
+        flat["successful_requests"] = totals.get("successful", 0)
+        flat["errored_requests"] = totals.get("errored", 0)
+        flat["total_requests"] = totals.get("total", 0)
+
+        # Extract mean and percentiles from each metric
+        metric_keys = [
+            ("output_tokens_per_second", "output_tok/sec"),
+            ("prompt_tokens_per_second", "prompt_tok/sec"),
+            ("tokens_per_second", "total_tok/sec"),
+            ("time_to_first_token_ms", "ttft"),
+            ("inter_token_latency_ms", "itl"),
+            ("time_per_output_token_ms", "tpot"),
+            ("request_latency", "request_latency"),
+            ("requests_per_second", "requests/sec"),
+        ]
+
+        for src_key, dst_prefix in metric_keys:
+            stat_dict = metrics.get(src_key, {})
+            d = stat_dict.get("successful", stat_dict)
+            if isinstance(d, dict):
+                for stat in ("mean", "median"):
+                    v = d.get(stat)
+                    if v is not None:
+                        flat[f"{dst_prefix}_{stat}"] = round(v, 4)
+                pcts = d.get("percentiles", {})
+                for p in ("p50", "p95", "p99"):
+                    v = pcts.get(p)
+                    if v is not None:
+                        flat[f"{dst_prefix}_{p}"] = round(v, 4)
+
+        flat["duration_s"] = bench.get("duration")
+        results.append(flat)
+
+    return results
+
+
+def _handle_read_benchmark_results(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Read and parse a GuideLLM benchmark JSON file into structured metrics."""
+    import os
+    results_path = args["results_path"]
+
+    command_history.append({
+        "tool": "read_benchmark_results",
+        "results_path": results_path,
+    })
+
+    if not os.path.exists(results_path):
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="read_benchmark_results",
+            success=False,
+            output="",
+            error=f"Results file not found: {results_path}",
+        )
+
+    try:
+        with open(results_path, "r") as f:
+            bench_data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="read_benchmark_results",
+            success=False,
+            output="",
+            error=f"Failed to parse JSON: {e}",
+        )
+
+    # Extract structured metrics
+    flat_metrics = _extract_flat_metrics(bench_data)
+
+    # Also get the GuideLLM summary
+    guidellm_summary = _extract_guidellm_metrics(bench_data)
+
+    # Build output
+    output_parts = [guidellm_summary, ""]
+    output_parts.append("=== FLAT METRICS PER CONCURRENCY (for compare_benchmarks) ===")
+    for fm in flat_metrics:
+        output_parts.append(json.dumps(fm, indent=2))
+
+    output_text = "\n".join(output_parts)
+    command_history[-1]["success"] = True
+
+    return ToolResult(
+        tool="read_benchmark_results",
+        success=True,
+        output=output_text,
+    )
+
+
+def _handle_compare_benchmarks(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Compare two GuideLLM benchmark runs and detect regressions/improvements."""
+    import os
+    baseline_path = args["baseline_path"]
+    current_path = args["current_path"]
+    threshold = args.get("threshold", 0.02)
+
+    command_history.append({
+        "tool": "compare_benchmarks",
+        "baseline_path": baseline_path,
+        "current_path": current_path,
+        "threshold": threshold,
+    })
+
+    # Load both files
+    for path, label in [(baseline_path, "Baseline"), (current_path, "Current")]:
+        if not os.path.exists(path):
+            command_history[-1]["success"] = False
+            return ToolResult(
+                tool="compare_benchmarks",
+                success=False,
+                output="",
+                error=f"{label} file not found: {path}",
+            )
+
+    try:
+        with open(baseline_path, "r") as f:
+            baseline_data = json.load(f)
+        with open(current_path, "r") as f:
+            current_data = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="compare_benchmarks",
+            success=False,
+            output="",
+            error=f"Failed to parse JSON: {e}",
+        )
+
+    # Extract flat metrics
+    baseline_metrics_list = _extract_flat_metrics(baseline_data)
+    current_metrics_list = _extract_flat_metrics(current_data)
+
+    if not baseline_metrics_list or not current_metrics_list:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="compare_benchmarks",
+            success=False,
+            output="",
+            error="One or both benchmark files contain no benchmark data.",
+        )
+
+    # Import regression detector
+    try:
+        from .analysis.regression import detect_regression
+    except ImportError:
+        # Inline minimal comparison if module not available
+        detect_regression = None
+
+    output_parts = ["=== BENCHMARK COMPARISON ==="]
+    output_parts.append(f"Baseline: {baseline_path}")
+    output_parts.append(f"Current:  {current_path}")
+    output_parts.append(f"Threshold: {threshold * 100:.1f}%")
+
+    # Compare each concurrency level
+    baseline_by_conc = {m.get("concurrency", 0): m for m in baseline_metrics_list}
+    current_by_conc = {m.get("concurrency", 0): m for m in current_metrics_list}
+
+    common_conc = sorted(set(baseline_by_conc.keys()) & set(current_by_conc.keys()))
+
+    if not common_conc:
+        # Fall back to comparing first entry from each
+        output_parts.append("\nNo common concurrency levels. Comparing first entries.")
+        common_conc = [baseline_metrics_list[0].get("concurrency", 0)]
+        current_by_conc[common_conc[0]] = current_metrics_list[0]
+
+    all_comparisons = []
+    for conc in common_conc:
+        baseline_flat = baseline_by_conc.get(conc, baseline_metrics_list[0])
+        current_flat = current_by_conc.get(conc, current_metrics_list[0])
+
+        output_parts.append(f"\n--- Concurrency: {conc} ---")
+
+        if detect_regression is not None:
+            result = detect_regression(baseline_flat, current_flat, threshold=threshold)
+            if result.get("status") == "success":
+                output_parts.append(f"  Verdict: {result['summary']['verdict']}")
+                output_parts.append(f"  {result['message']}")
+
+                for comp in result.get("regressions", []):
+                    output_parts.append(
+                        f"  REGRESSION: {comp['metric']}: "
+                        f"{comp['baseline_value']} -> {comp['current_value']} "
+                        f"({comp['percent_change']:+.1f}%)"
+                    )
+                for comp in result.get("improvements", []):
+                    output_parts.append(
+                        f"  IMPROVED: {comp['metric']}: "
+                        f"{comp['baseline_value']} -> {comp['current_value']} "
+                        f"({comp['percent_change']:+.1f}%)"
+                    )
+                all_comparisons.append(result)
+            else:
+                output_parts.append(f"  Error: {result.get('message', 'unknown')}")
+        else:
+            # Manual comparison
+            for key in sorted(set(baseline_flat.keys()) & set(current_flat.keys())):
+                bv = baseline_flat[key]
+                cv = current_flat[key]
+                if isinstance(bv, (int, float)) and isinstance(cv, (int, float)) and bv != 0:
+                    pct = ((cv - bv) / bv) * 100
+                    output_parts.append(f"  {key}: {bv} -> {cv} ({pct:+.1f}%)")
+
+    output_text = "\n".join(output_parts)
+    command_history[-1]["success"] = True
+
+    return ToolResult(
+        tool="compare_benchmarks",
+        success=True,
+        output=output_text,
+    )
+
+
 def _handle_done(
     args: dict,
     _executor: RemoteExecutor,
@@ -943,6 +1449,9 @@ _TOOL_HANDLERS = {
     "read_file": _handle_read_file,
     "write_file": _handle_write_file,
     "run_benchmark": _handle_run_benchmark,
+    "fetch_vllm_logs": _handle_fetch_vllm_logs,
+    "read_benchmark_results": _handle_read_benchmark_results,
+    "compare_benchmarks": _handle_compare_benchmarks,
     "analyze_trace": _handle_analyze_trace,
     "map_kernel": _handle_map_kernel,
     "done": _handle_done,

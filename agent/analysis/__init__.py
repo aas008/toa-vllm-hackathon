@@ -47,6 +47,11 @@ from agent.analysis.regression import (
     detect_regression,
 )
 
+# -- vLLM Log Parser --
+from agent.analysis.vllm_log_parser import (
+    parse_vllm_log,
+)
+
 # -- Cost Efficiency --
 from agent.analysis.cost import (
     calculate_cost,
@@ -75,6 +80,8 @@ __all__ = [
     "PYTORCH_STDLIB_OPS",
     # regression
     "detect_regression",
+    # vllm_log_parser
+    "parse_vllm_log",
     # cost
     "calculate_cost",
     "calculate_cpmt",
