@@ -1018,11 +1018,13 @@ class AgentTools:
     def dispatch(self, name: str, args: dict) -> ToolResult:
         """Dispatch a tool call, tracking history on this instance.
 
-        For run_benchmark, auto-fills endpoint and model if not provided.
+        For run_benchmark, always uses the CLI-provided endpoint and model
+        (the agent may see different ports/models inside the pod, but the
+        benchmark runs locally against the port-forwarded endpoint).
         """
         if name == "run_benchmark":
-            args.setdefault("endpoint", self.vllm_endpoint)
-            args.setdefault("model", self.model_name)
+            args["endpoint"] = self.vllm_endpoint
+            args["model"] = self.model_name
         return dispatch_tool(name, args, self.executor, self.command_history)
 
     # Convenience methods for direct (non-agent) use

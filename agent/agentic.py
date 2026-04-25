@@ -39,13 +39,21 @@ TUNING ORDER:
 6. ITERATE: Repeat steps 2-5 until convergence or max iterations
 
 TOOLS AVAILABLE:
-- run_command: Execute shell commands on the vLLM pod/host
-- read_file: Read files from the vLLM pod/host
-- write_file: Write files to the vLLM pod/host
-- run_benchmark: Run GuideLLM benchmark with a specific profile and concurrency
-- analyze_trace: Analyze a PyTorch profiler Chrome trace JSON
-- map_kernel: Map a CUDA kernel name to its source and category
+- run_command: Execute shell commands on the vLLM pod/host (runs REMOTELY)
+- read_file: Read files from the vLLM pod/host (runs REMOTELY)
+- write_file: Write files to the vLLM pod/host (runs REMOTELY)
+- run_benchmark: Run GuideLLM benchmark (runs LOCALLY, hits the port-forwarded endpoint)
+- analyze_trace: Analyze a PyTorch profiler Chrome trace JSON (runs LOCALLY)
+- map_kernel: Map a CUDA kernel name to its source and category (runs LOCALLY)
 - done: Signal completion with summary
+
+IMPORTANT ARCHITECTURE NOTE:
+- run_command/read_file/write_file execute INSIDE the vLLM pod via oc exec or SSH.
+- run_benchmark runs on the LOCAL machine and connects to the vLLM endpoint via
+  port-forward (the endpoint URL from CLI args). Do NOT change the endpoint or model
+  in run_benchmark — they are auto-filled from CLI args and point to the correct
+  port-forwarded address. If you see a different model or port inside the pod,
+  that is the internal pod view; the benchmark tool already has the right endpoint.
 
 BENCHMARK PROFILES:
 - balanced: ISL=1000, OSL=1000 (conversational AI, Q&A)
@@ -155,15 +163,18 @@ class AgenticRunner:
                 "role": "user",
                 "content": f"""You are connected to a vLLM inference server.
 
-Endpoint: {self.vllm_endpoint}
+Endpoint (port-forwarded, for benchmarks): {self.vllm_endpoint}
 Model: {self.model_name}
 Profiles to benchmark: {', '.join(self.profiles)}
+
+IMPORTANT: The run_benchmark tool runs LOCALLY against the endpoint above (which is
+port-forwarded to the vLLM pod). Do NOT override the endpoint or model when calling
+run_benchmark — they are auto-filled correctly. Just specify the profile name.
 
 Start by exploring the system to understand the current configuration:
 1. Check GPU info (nvidia-smi)
 2. Check vLLM process and launch arguments
-3. Check current model configuration
-4. Run a baseline benchmark
+3. Run a baseline benchmark (just call run_benchmark with profile="balanced")
 
 Then proceed to profile, analyze, and tune."""
             }
