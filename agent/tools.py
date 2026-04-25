@@ -562,6 +562,29 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "check_preemptions",
+        "description": (
+            "Query the vLLM Prometheus /metrics endpoint and return the preemption count. "
+            "Preemptions happen when vLLM evicts KV cache entries under memory pressure, "
+            "which severely hurts latency and throughput. If preemptions are occurring, "
+            "further tuning is unlikely to help — the workload exceeds GPU memory capacity. "
+            "Call this AFTER each benchmark to detect preemptions early."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "endpoint": {
+                    "type": "string",
+                    "description": (
+                        "vLLM endpoint URL to query. If omitted, uses the baseline endpoint. "
+                        "For experiment pods, pass the endpoint returned by create_vllm_pod."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "create_vllm_pod",
         "description": (
             "Create a new experiment pod from the pod template with extra vLLM CLI args. "
@@ -1489,6 +1512,77 @@ def _handle_compare_benchmarks(
     )
 
 
+def _handle_check_preemptions(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Query vLLM /metrics endpoint for preemption count."""
+    import re
+    import urllib.request
+    import urllib.error
+
+    endpoint = args.get("endpoint", "").rstrip("/")
+    if not endpoint:
+        return ToolResult(
+            tool="check_preemptions",
+            success=False,
+            output="",
+            error="No endpoint provided and no default available. Pass endpoint explicitly.",
+        )
+
+    metrics_url = f"{endpoint}/metrics"
+
+    command_history.append({
+        "tool": "check_preemptions",
+        "endpoint": endpoint,
+    })
+
+    try:
+        req = urllib.request.Request(metrics_url, method="GET")
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = resp.read().decode("utf-8")
+    except Exception as e:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="check_preemptions",
+            success=False,
+            output="",
+            error=f"Failed to fetch {metrics_url}: {e}",
+        )
+
+    # Parse preemption counter
+    preemption_count = 0.0
+    for line in body.splitlines():
+        if line.startswith("vllm:num_preemptions_total"):
+            m = re.search(r"}\s+([\d.eE+\-]+)", line)
+            if m:
+                preemption_count += float(m.group(1))
+
+    command_history[-1]["success"] = True
+    command_history[-1]["preemption_count"] = preemption_count
+
+    if preemption_count > 0:
+        output = (
+            f"WARNING: {int(preemption_count)} preemption(s) detected!\n"
+            f"vLLM is evicting KV cache entries under memory pressure.\n"
+            f"This means the workload exceeds available GPU memory for the current config.\n"
+            f"Further tuning is unlikely to help. Consider:\n"
+            f"  - Reducing max-num-seqs or max-num-batched-tokens\n"
+            f"  - Reducing max-model-len\n"
+            f"  - Using quantization to free memory\n"
+            f"  - If preemptions persist across configs, stop tuning and report findings."
+        )
+    else:
+        output = "No preemptions detected. KV cache pressure is within limits."
+
+    return ToolResult(
+        tool="check_preemptions",
+        success=True,
+        output=output,
+    )
+
+
 def _handle_create_vllm_pod(
     args: dict,
     _executor: RemoteExecutor,
@@ -1619,6 +1713,7 @@ _TOOL_HANDLERS = {
     "compare_benchmarks": _handle_compare_benchmarks,
     "analyze_trace": _handle_analyze_trace,
     "map_kernel": _handle_map_kernel,
+    "check_preemptions": _handle_check_preemptions,
     "create_vllm_pod": _handle_create_vllm_pod,
     "delete_vllm_pod": _handle_delete_vllm_pod,
     "done": _handle_done,
@@ -1738,6 +1833,9 @@ class AgentTools:
             if "endpoint" not in args or not args.get("endpoint"):
                 args["endpoint"] = self.vllm_endpoint  # baseline default
             args["model"] = self.model_name
+        elif name == "check_preemptions":
+            if "endpoint" not in args or not args.get("endpoint"):
+                args["endpoint"] = self.vllm_endpoint  # baseline default
         return dispatch_tool(
             name, args, self.executor, self.command_history,
             pod_manager=self.pod_manager,

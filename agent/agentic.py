@@ -45,6 +45,7 @@ TOOLS AVAILABLE:
 - compare_benchmarks: Compare two benchmark JSON files to detect regressions (runs LOCALLY)
 - analyze_trace: Analyze a PyTorch profiler Chrome trace JSON (runs LOCALLY)
 - map_kernel: Map a CUDA kernel name to its source and category (runs LOCALLY)
+- check_preemptions: Query vLLM /metrics for KV cache preemption count (runs LOCALLY via endpoint)
 - create_vllm_pod: Create an experiment pod with extra vLLM args (returns pod_name + endpoint)
 - delete_vllm_pod: Delete an experiment pod and clean up port-forward
 - done: Signal completion with summary
@@ -69,10 +70,11 @@ TUNING WORKFLOW (follow this order strictly):
    a. Call create_vllm_pod with vllm_args (e.g. ["--enable-chunked-prefill"])
       → Returns pod_name and endpoint (e.g. "http://localhost:8001")
    b. Call run_benchmark with profile="balanced" AND endpoint from step 2a
-   c. Call fetch_vllm_logs with pod_name from step 2a (reads experiment pod logs)
-   d. Call read_benchmark_results with the JSON path from step 2b
-   e. Call compare_benchmarks with baseline JSON (from step 1c) and experiment JSON (from step 2d)
-   f. Call delete_vllm_pod with pod_name from step 2a to clean up
+   c. Call check_preemptions with endpoint from step 2a
+   d. Call fetch_vllm_logs with pod_name from step 2a (reads experiment pod logs)
+   e. Call read_benchmark_results with the JSON path from step 2b
+   f. Call compare_benchmarks with baseline JSON (from step 1c) and experiment JSON (from step 2e)
+   g. Call delete_vllm_pod with pod_name from step 2a to clean up
 
 3. NEVER kill processes on the baseline pod. NEVER restart the baseline pod.
    All tuning is done by creating fresh experiment pods with different args.
@@ -138,6 +140,10 @@ STOPPING CRITERIA:
   the counter to zero.
 - Do NOT stop early just because one or two experiments didn't help. Keep exploring
   different parameter combinations.
+- PREEMPTION CHECK: After each benchmark, call check_preemptions. If preemptions
+  are detected (count > 0), the workload is exceeding GPU memory capacity.
+  Stop tuning immediately — call done and report that preemptions make further
+  tuning futile. Include the preemption count and which config triggered it.
 - When you do call done, include ALL experiment results (not just the best one).
 
 REPORTING FORMAT:
