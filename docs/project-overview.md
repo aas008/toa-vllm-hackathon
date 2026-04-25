@@ -10,7 +10,7 @@ We built an autonomous agent that benchmarks, profiles, and tunes vLLM inference
 
 ## Problem
 
-vLLM ships with default serving parameters that leave performance on the table. Tuning requires iteratively adjusting 10+ hyperparameters (batch sizes, GPU memory allocation, chunked prefill, CUDA graphs, tensor parallelism), restarting the server, benchmarking under realistic workloads, and interpreting the results — a time-consuming process that demands deep systems expertise. Each model and hardware combination requires its own tuning pass.
+vLLM ships with default serving parameters that leave performance on the table. Tuning requires iteratively adjusting 10+ hyperparameters (batch sizes, CUDA GRAPH CAPTURE SIZES, chunked prefill, CUDA graphs, parallelism), restarting the server, benchmarking under realistic workloads, and interpreting the results — a time-consuming process that demands deep systems expertise. Each model and hardware combination requires its own tuning pass.
 
 ## Goal
 
@@ -38,7 +38,7 @@ Build a CLI tool that takes a vLLM endpoint and model name, then autonomously: (
      │  • run_eval      │ │  • run_command │ │  • compare       │
      │    (eval pipeline│ │  • read_file   │ │    _benchmarks   │
      │    full lifecycle)│ │  • write_file  │ │  • analyze_trace │
-     │  • run_benchmark │ │  • fetch_vllm  │ │  • map_kernel    │
+     │  • run_benchmark │ │  • fetch_vllm  │ │  • map_kernel [wip] │
      │    (GuideLLM)    │ │    _logs       │ │  • analyze_eval  │
      └────────┬─────────┘ └───────┬───────┘ │    _results      │
               │                   │          └────────┬─────────┘

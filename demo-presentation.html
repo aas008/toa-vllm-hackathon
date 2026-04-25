@@ -1,0 +1,802 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Autonomous vLLM Performance Tuning Agent</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Inter', -apple-system, sans-serif;
+    background: #0a0a0a;
+    color: #e0e0e0;
+    overflow: hidden;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  .slide {
+    display: none;
+    width: 100vw;
+    height: 100vh;
+    padding: 50px 70px;
+    position: absolute;
+    top: 0; left: 0;
+    flex-direction: column;
+    justify-content: center;
+  }
+  .slide.active { display: flex; }
+
+  /* Scroll mode: all slides visible and stacked */
+  body.scroll-mode {
+    overflow: auto;
+    height: auto;
+  }
+  body.scroll-mode .slide {
+    display: flex !important;
+    position: relative;
+    min-height: 100vh;
+    height: auto;
+    page-break-after: always;
+    break-after: page;
+  }
+  body.scroll-mode .nav,
+  body.scroll-mode .progress { display: none; }
+  body.scroll-mode .slide + .slide {
+    border-top: 2px solid #333;
+  }
+
+  /* Print styles */
+  @media print {
+    body {
+      overflow: visible !important;
+      height: auto !important;
+    }
+    .slide {
+      display: flex !important;
+      position: relative !important;
+      min-height: 100vh;
+      height: auto;
+      page-break-after: always;
+      break-after: page;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+    .nav, .progress { display: none !important; }
+    .terminal, .arch-box { max-height: none !important; overflow: visible !important; }
+  }
+
+  /* Slide backgrounds */
+  .slide-1  { background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%); }
+  .slide-2  { background: linear-gradient(135deg, #1a0a0a 0%, #2d1111 50%, #1a0a0a 100%); }
+  .slide-3  { background: linear-gradient(135deg, #0a1a0a 0%, #112d11 50%, #0a1a0a 100%); }
+  .slide-4  { background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 100%); }
+  .slide-5  { background: linear-gradient(135deg, #0a0a1a 0%, #0d0d2a 50%, #0a0a1a 100%); }
+  .slide-6  { background: linear-gradient(135deg, #1a1a0a 0%, #2d2d11 50%, #1a1a0a 100%); }
+  .slide-7  { background: linear-gradient(135deg, #0a0f1a 0%, #112233 50%, #0a0f1a 100%); }
+  .slide-8  { background: linear-gradient(135deg, #0a1a0a 0%, #112d11 50%, #0a1a0a 100%); }
+  .slide-9  { background: linear-gradient(135deg, #0a0a1a 0%, #111122 50%, #1a0a2d 100%); }
+  .slide-10 { background: linear-gradient(135deg, #0f0f1a 0%, #1a1a2e 50%, #16213e 100%); }
+
+  /* Typography */
+  .slide-number {
+    position: absolute;
+    top: 24px; right: 36px;
+    font-size: 13px;
+    color: #555;
+    font-weight: 500;
+  }
+  h1 {
+    font-size: 52px;
+    font-weight: 800;
+    line-height: 1.1;
+    margin-bottom: 18px;
+    background: linear-gradient(90deg, #fff 0%, #a0a0ff 100%);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  h2 {
+    font-size: 38px;
+    font-weight: 700;
+    margin-bottom: 32px;
+    color: #fff;
+  }
+  h3 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: #8888ff;
+  }
+  .subtitle {
+    font-size: 20px;
+    font-weight: 300;
+    color: #888;
+    margin-bottom: 36px;
+  }
+  .tag {
+    display: inline-block;
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 12px;
+    font-weight: 600;
+    margin-right: 6px;
+    margin-bottom: 6px;
+  }
+  .tag-red { background: #3d1111; color: #ff6b6b; border: 1px solid #5a2020; }
+  .tag-green { background: #113d11; color: #6bff6b; border: 1px solid #205a20; }
+  .tag-blue { background: #11113d; color: #6b6bff; border: 1px solid #20205a; }
+  .tag-yellow { background: #3d3d11; color: #ffff6b; border: 1px solid #5a5a20; }
+  .tag-cyan { background: #113d3d; color: #6bffff; border: 1px solid #205a5a; }
+
+  /* Layout helpers */
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 50px; align-items: start; }
+  .three-col { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 24px; }
+
+  /* Cards */
+  .card {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 14px;
+    padding: 22px;
+    margin-bottom: 12px;
+  }
+  .card p { font-size: 15px; line-height: 1.6; color: #aaa; }
+  .card .icon { font-size: 28px; margin-bottom: 10px; }
+
+  /* Problem list */
+  .problem-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+  .problem-item .marker {
+    flex-shrink: 0;
+    width: 30px; height: 30px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    margin-top: 2px;
+  }
+  .marker-red { background: #3d1111; color: #ff6b6b; }
+  .marker-green { background: #113d11; color: #6bff6b; }
+  .problem-item .text { font-size: 16px; line-height: 1.5; }
+  .problem-item .text strong { color: #fff; }
+
+  /* Terminal / code box */
+  .arch-box, .terminal {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 12px;
+    padding: 18px 20px;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 13px;
+    line-height: 1.8;
+    color: #ccc;
+    white-space: pre;
+    overflow-x: auto;
+    overflow-y: auto;
+  }
+  .terminal {
+    background: #0c0c0c;
+    border-color: #333;
+    line-height: 1.6;
+    max-height: 520px;
+  }
+  .terminal .prompt { color: #6bff6b; }
+  .terminal .dim { color: #666; }
+  .terminal .info { color: #8888ff; }
+  .terminal .warn { color: #ffff6b; }
+  .terminal .ok { color: #6bff6b; }
+  .terminal .err { color: #ff6b6b; }
+  .terminal .metric-val { color: #6bffff; font-weight: 600; }
+  .arch-box .comment { color: #666; }
+  .arch-box .keyword { color: #8888ff; }
+  .arch-box .string { color: #6bff6b; }
+  .arch-box .error { color: #ff6b6b; }
+
+  /* Metric highlight */
+  .metric {
+    display: inline-block;
+    padding: 10px 18px;
+    background: rgba(107,255,107,0.08);
+    border: 1px solid rgba(107,255,107,0.2);
+    border-radius: 10px;
+    margin: 5px 6px 5px 0;
+  }
+  .metric .value { font-size: 26px; font-weight: 700; color: #6bff6b; }
+  .metric .label { font-size: 12px; color: #888; margin-top: 2px; }
+  .metric-red { background: rgba(255,107,107,0.08); border-color: rgba(255,107,107,0.2); }
+  .metric-red .value { color: #ff6b6b; }
+  .metric-blue { background: rgba(107,107,255,0.08); border-color: rgba(107,107,255,0.2); }
+  .metric-blue .value { color: #8888ff; }
+
+  /* Flow steps */
+  .flow-step {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 12px;
+  }
+  .flow-step .num {
+    flex-shrink: 0;
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    background: rgba(136,136,255,0.15);
+    border: 1px solid rgba(136,136,255,0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    font-weight: 700;
+    color: #8888ff;
+  }
+  .flow-step .desc { font-size: 15px; color: #ccc; }
+  .flow-step .desc code {
+    background: rgba(255,255,255,0.08);
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-size: 12px;
+    color: #a0a0ff;
+  }
+  .arrow {
+    margin: 2px 0 2px 14px;
+    color: #444;
+    font-size: 13px;
+  }
+
+  /* Navigation */
+  .nav {
+    position: fixed;
+    bottom: 24px;
+    right: 36px;
+    display: flex;
+    gap: 10px;
+    z-index: 100;
+  }
+  .nav button {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    border: 1px solid rgba(255,255,255,0.15);
+    background: rgba(255,255,255,0.05);
+    color: #aaa;
+    font-size: 16px;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .nav button:hover { background: rgba(255,255,255,0.12); color: #fff; }
+  .progress {
+    position: fixed;
+    bottom: 0; left: 0;
+    height: 3px;
+    background: linear-gradient(90deg, #6b6bff, #8888ff);
+    transition: width 0.3s ease;
+  }
+
+  /* Team */
+  .team-grid { display: flex; gap: 16px; flex-wrap: wrap; }
+  .team-member {
+    background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.08);
+    border-radius: 12px;
+    padding: 16px 24px;
+    text-align: center;
+  }
+  .team-member .name { font-size: 16px; font-weight: 600; color: #fff; margin-bottom: 3px; }
+  .team-member .role { font-size: 13px; color: #888; }
+
+  /* Table */
+  .results-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  .results-table th {
+    text-align: left;
+    padding: 10px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.15);
+    color: #888;
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .results-table td {
+    padding: 8px 14px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    color: #ccc;
+  }
+  .results-table .improved { color: #6bff6b; font-weight: 600; }
+  .results-table .regressed { color: #ff6b6b; font-weight: 600; }
+  .results-table .neutral { color: #888; }
+  .results-table .config-cell { font-family: monospace; font-size: 12px; color: #a0a0ff; }
+</style>
+</head>
+<body>
+
+<!-- ==================== Slide 1: Title ==================== -->
+<div class="slide slide-1 active" id="slide-1">
+  <div class="slide-number">1 / 10</div>
+  <div>
+    <span class="tag tag-blue">AI Performance Hackathon</span>
+    <span class="tag tag-green">Team TOA</span>
+    <h1 style="margin-top: 20px;">Autonomous vLLM<br>Performance Tuning Agent</h1>
+    <p class="subtitle">An AI agent that benchmarks, analyzes, and tunes vLLM inference servers<br>without human intervention &mdash; safely, iteratively, and at scale.</p>
+    <div style="margin-top: 32px;">
+      <div class="team-grid">
+        <div class="team-member"><div class="name">Aanya Sharma</div><div class="role">Agent Architecture</div></div>
+
+        <div class="team-member"><div class="name">Rohan Awhad</div><div class="role">Evaluation Harness</div></div>
+        <div class="team-member"><div class="name">Thameem Ibrahim</div><div class="role">Infrastructure</div></div>
+      </div>
+    </div>
+    <div style="margin-top: 28px;">
+      <div class="metric-blue metric"><div class="value">NVIDIA H100 80GB</div><div class="label">GPU Target</div></div>
+      <div class="metric-blue metric"><div class="value">Claude + GuideLLM</div><div class="label">Powered By</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 2: Problem ==================== -->
+<div class="slide slide-2" id="slide-2">
+  <div class="slide-number">2 / 10</div>
+  <h2>The Problem</h2>
+  <div class="two-col">
+    <div>
+      <div class="problem-item">
+        <div class="marker marker-red">1</div>
+        <div class="text"><strong>Tuning kills the server.</strong> Restarting vLLM inside the pod kills PID 1, which crashes the entire pod. The agent gets stuck in a recovery loop.</div>
+      </div>
+      <div class="problem-item">
+        <div class="marker marker-red">2</div>
+        <div class="text"><strong>No baseline comparison.</strong> Without a stable reference, you can't tell if a change actually improved performance or if variance is fooling you.</div>
+      </div>
+      <div class="problem-item">
+        <div class="marker marker-red">3</div>
+        <div class="text"><strong>Manual tuning doesn't scale.</strong> vLLM has 10+ tunable parameters with complex interactions. Testing combinations by hand is slow and error-prone.</div>
+      </div>
+    </div>
+    <div class="arch-box"><span class="comment"># What used to happen:</span>
+
+<span class="keyword">agent</span> &rarr; kill PID 1 to restart vLLM
+<span class="keyword">pod</span>   &rarr; <span class="error">CrashLoopBackOff</span>
+<span class="keyword">agent</span> &rarr; retry... retry... retry...
+<span class="keyword">agent</span> &rarr; <span class="error">"Max iterations reached"</span>
+
+<span class="comment"># No results. No comparison.</span>
+<span class="comment"># Just a dead pod and wasted API tokens.</span></div>
+  </div>
+</div>
+
+<!-- ==================== Slide 3: Solution ==================== -->
+<div class="slide slide-3" id="slide-3">
+  <div class="slide-number">3 / 10</div>
+  <h2>Our Solution: Pod-per-Experiment</h2>
+  <div class="two-col">
+    <div>
+      <div class="problem-item">
+        <div class="marker marker-green">1</div>
+        <div class="text"><strong>Baseline is read-only.</strong> The original pod is never modified. It serves as a stable reference for every comparison.</div>
+      </div>
+      <div class="problem-item">
+        <div class="marker marker-green">2</div>
+        <div class="text"><strong>Fresh pod per experiment.</strong> Each tuning attempt creates a new pod with different vLLM args, benchmarks it, then deletes it.</div>
+      </div>
+      <div class="problem-item">
+        <div class="marker marker-green">3</div>
+        <div class="text"><strong>Automated A/B testing.</strong> Every experiment is compared against the same baseline with regression detection (2% threshold).</div>
+      </div>
+      <div class="problem-item">
+        <div class="marker marker-green">4</div>
+        <div class="text"><strong>Self-cleaning.</strong> Experiment pods are deleted after benchmarking. <code>atexit</code> cleanup runs even on crashes.</div>
+      </div>
+    </div>
+    <div class="arch-box"><span class="comment"># New architecture:</span>
+
+<span class="keyword">Baseline pod</span> (read-only, never modified)
+  <span class="string">&bull;</span> oc port-forward :8000
+  <span class="string">&bull;</span> run_benchmark &rarr; baseline.json
+  <span class="string">&bull;</span> fetch_vllm_logs &rarr; baseline config
+
+<span class="keyword">Experiment pod</span> (created per tuning attempt)
+  <span class="string">&bull;</span> oc port-forward :8001, :8002, ...
+  <span class="string">&bull;</span> run_benchmark &rarr; experiment.json
+  <span class="string">&bull;</span> compare_benchmarks(baseline, experiment)
+  <span class="string">&bull;</span> <span class="error">oc delete pod</span> (cleanup)
+
+<span class="comment"># Real pod names from our run:</span>
+<span class="string">vllm-tune-1777144117</span>  (chunked prefill)
+<span class="string">vllm-tune-1777144304</span>  (gpu-mem 0.95)
+<span class="string">vllm-tune-1777144451</span>  (gpu-mem + prefix)</div>
+  </div>
+</div>
+
+<!-- ==================== Slide 4: Agent Workflow ==================== -->
+<div class="slide slide-4" id="slide-4">
+  <div class="slide-number">4 / 10</div>
+  <h2>Agent Workflow</h2>
+  <div class="two-col">
+    <div>
+      <h3>Phase 1 &mdash; Baseline</h3>
+      <div class="flow-step"><div class="num">1</div><div class="desc">Inspect GPU &amp; vLLM config via <code>run_command</code></div></div>
+      <div class="flow-step"><div class="num">2</div><div class="desc">Benchmark baseline with <code>run_benchmark</code></div></div>
+      <div class="flow-step"><div class="num">3</div><div class="desc">Parse logs + extract metrics with <code>fetch_vllm_logs</code></div></div>
+      <div class="arrow">&darr;</div>
+      <h3>Phase 2 &mdash; Experiments (loop)</h3>
+      <div class="flow-step"><div class="num">4</div><div class="desc">Create experiment pod via <code>create_vllm_pod</code></div></div>
+      <div class="flow-step"><div class="num">5</div><div class="desc">Benchmark experiment at new endpoint</div></div>
+      <div class="flow-step"><div class="num">6</div><div class="desc">Compare against baseline with <code>compare_benchmarks</code></div></div>
+      <div class="flow-step"><div class="num">7</div><div class="desc">Delete pod &amp; try next combination</div></div>
+      <div class="arrow">&darr;</div>
+      <h3>Phase 3 &mdash; Report</h3>
+      <div class="flow-step"><div class="num">8</div><div class="desc">Call <code>done</code> with structured summary</div></div>
+    </div>
+    <div>
+      <h3>Stopping Criteria</h3>
+      <div class="card">
+        <p>The agent keeps exploring until <strong style="color:#fff;">10 consecutive experiments</strong> show no improvement (&gt;2% threshold). No premature stopping. Default max: 100 iterations.</p>
+      </div>
+      <h3 style="margin-top: 20px;">13 Tools Available</h3>
+      <div class="card">
+        <p>
+          <code>run_command</code> <code>read_file</code> <code>write_file</code><br>
+          <code>run_benchmark</code> <code>fetch_vllm_logs</code><br>
+          <code>read_benchmark_results</code> <code>compare_benchmarks</code><br>
+          <code>analyze_trace</code> <code>map_kernel</code><br>
+          <code>create_vllm_pod</code> <code>delete_vllm_pod</code><br>
+          <code>check_preemptions</code> <code>done</code>
+        </p>
+      </div>
+      <h3 style="margin-top: 20px;">Claude Decides Everything</h3>
+      <div class="card">
+        <p>Which params to try, how to interpret results, when to combine winning configs, when failures are noise vs. real regressions, and when to stop.</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 5: System Prompt Engineering ==================== -->
+<div class="slide slide-5" id="slide-5">
+  <div class="slide-number">5 / 10</div>
+  <h2>System Prompt Engineering</h2>
+  <div class="two-col">
+    <div>
+      <h3>Structured Workflow in the Prompt</h3>
+      <div class="terminal" style="font-size: 12px; line-height: 1.5; max-height: 480px;"><span class="info">TUNING WORKFLOW (follow this order strictly):</span>
+<span class="dim">1.</span> Benchmark the BASELINE pod (already running):
+   <span class="ok">a.</span> Call run_benchmark with profile="balanced"
+   <span class="ok">b.</span> Call fetch_vllm_logs (baseline pod logs)
+   <span class="ok">c.</span> Call read_benchmark_results
+   <span class="warn">&rarr; Save the baseline JSON path for comparison.</span>
+
+<span class="dim">2.</span> For EACH tuning experiment:
+   <span class="ok">a.</span> Call <span class="info">create_vllm_pod</span> with vllm_args
+      &rarr; Returns pod_name and endpoint
+   <span class="ok">b.</span> Call run_benchmark with experiment endpoint
+   <span class="ok">c.</span> Call fetch_vllm_logs with pod_name
+   <span class="ok">d.</span> Call read_benchmark_results
+   <span class="ok">e.</span> Call <span class="info">compare_benchmarks</span>(baseline, experiment)
+   <span class="ok">f.</span> Call <span class="err">delete_vllm_pod</span> to clean up
+
+<span class="dim">3.</span> <span class="err">NEVER kill processes on the baseline pod.</span>
+   <span class="err">NEVER restart the baseline pod.</span>
+
+<span class="info">STOPPING CRITERIA:</span>
+- Keep running until <span class="warn">10 CONSECUTIVE</span> experiments
+  show NO improvement over current best.
+- Any experiment improving throughput OR latency
+  by &gt;2% <span class="ok">resets the counter to zero</span>.
+- Do NOT stop early.</div>
+    </div>
+    <div>
+      <h3>Tunable Parameters Taught to Claude</h3>
+      <div class="terminal" style="font-size: 12px; line-height: 1.5; max-height: 220px;"><span class="info">VLLM TUNABLE PARAMETERS:</span>
+<span class="dim"> 1.</span> --max-num-seqs        <span class="warn">(1-1024)</span>
+<span class="dim"> 2.</span> --max-num-batched-tokens <span class="warn">(256-32768)</span>
+<span class="dim"> 3.</span> --gpu-memory-utilization <span class="warn">(0.80-0.95)</span>
+<span class="dim"> 4.</span> --enable-chunked-prefill <span class="warn">(bool)</span>
+<span class="dim"> 5.</span> --enable-prefix-caching  <span class="warn">(bool)</span>
+<span class="dim"> 6.</span> --max-model-len        <span class="warn">(int)</span>
+<span class="dim"> 7.</span> --enforce-eager        <span class="warn">(bool)</span>
+<span class="dim"> 8.</span> --tensor-parallel-size <span class="warn">(1-8)</span>
+<span class="dim"> 9.</span> --quantization   <span class="warn">(fp8/awq/gptq)</span>
+<span class="dim">10.</span> --scheduling-policy <span class="warn">(fcfs/priority)</span></div>
+      <h3 style="margin-top: 20px;">Mandatory Post-Benchmark Steps</h3>
+      <div class="terminal" style="font-size: 12px; line-height: 1.5; max-height: 200px;"><span class="info">MANDATORY WORKFLOW FOR EACH BENCHMARK:</span>
+After EVERY run_benchmark call, you MUST:
+
+<span class="dim">1.</span> CALL <span class="ok">fetch_vllm_logs</span>
+   Parses 120+ regex patterns:
+   server config, engine config, memory,
+   compilation timing, warnings/errors
+
+<span class="dim">2.</span> CALL <span class="ok">read_benchmark_results</span>
+   Returns per-concurrency metrics:
+   throughput, TTFT, ITL, TPOT (P50/P95/P99)</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 6: Engineering Deep Dive ==================== -->
+<div class="slide slide-6" id="slide-6">
+  <div class="slide-number">6 / 10</div>
+  <h2>Engineering Deep Dive</h2>
+  <div class="three-col">
+    <div class="card">
+      <div class="icon">&#x1F9EA;</div>
+      <h3>PodManager</h3>
+      <p>Creates pods from YAML template with modified vLLM args. Generates unique names (<code>vllm-tune-{ts}</code>), polls readiness every 5s, starts <code>oc port-forward</code> on incrementing ports (8001, 8002...). Tracks all procs for cleanup.</p>
+    </div>
+    <div class="card">
+      <div class="icon">&#x1F504;</div>
+      <h3>Auto Request Type</h3>
+      <p>GuideLLM needs <code>--request-type</code>. We auto-detect: if model name contains "chat", "instruct", "it-" &rarr; <code>chat_completions</code>. Otherwise &rarr; <code>text_completions</code>. Fixed 400 errors on base models like opt-125m.</p>
+    </div>
+    <div class="card">
+      <div class="icon">&#x1F50D;</div>
+      <h3>120+ Log Patterns</h3>
+      <p>Regex parser extracts: vLLM version, non-default args, architecture, dtype, TP size, chunked prefill, attention backend, KV cache size, CUDA graph timing, torch.compile time, model memory, and all warnings/errors.</p>
+    </div>
+    <div class="card">
+      <div class="icon">&#x1F4CA;</div>
+      <h3>Directionality-Aware Comparison</h3>
+      <p>compare_benchmarks knows throughput is higher=better, latency is lower=better. 2% threshold. Reports per-metric regressions and improvements across 45 metrics per concurrency level.</p>
+    </div>
+    <div class="card">
+      <div class="icon">&#x1F6E1;</div>
+      <h3>Crash-Safe Cleanup</h3>
+      <p><code>atexit.register(cleanup_all)</code> + try/finally in main loop. Even if the agent crashes mid-experiment, leftover pods are deleted. Port-forward processes are killed.</p>
+    </div>
+    <div class="card">
+      <div class="icon">&#x1F4B0;</div>
+      <h3>Prompt Caching</h3>
+      <p>System prompt uses <code>cache_control: ephemeral</code>. On our 25-iteration run: 294K input tokens, but most were cache hits. Total cost: <strong style="color:#6bff6b;">$0.93</strong> for the full tuning session.</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 7: Live Agent Output ==================== -->
+<div class="slide slide-7" id="slide-7">
+  <div class="slide-number">7 / 10</div>
+  <h2>Live Agent Output</h2>
+  <p style="color: #888; margin-bottom: 16px; margin-top: -20px;">Real output from our agent run on H100 &mdash; 25 iterations, 3 experiments, fully autonomous</p>
+  <div class="terminal" style="font-size: 11.5px; line-height: 1.55; max-height: 520px;">
+<span class="prompt">&gt;&gt; Iteration 1/100</span>
+<span class="dim">   Tool: run_command</span>  <span class="info">{"command": "nvidia-smi"}</span>
+<span class="ok">   NVIDIA H100 80GB HBM3  |  73807MiB / 81559MiB  |  CUDA 13.0</span>
+<span class="ok">   VLLM::EngineCore  73798MiB</span>
+
+<span class="prompt">&gt;&gt; Iteration 2/100</span>
+<span class="dim">   Tool: run_command</span>  <span class="info">{"command": "cat /proc/1/cmdline | tr '\\0' ' '"}</span>
+<span class="ok">   /usr/bin/python3 /usr/local/bin/vllm serve --model /models/facebook/opt-125m --port 8000 --dtype auto</span>
+
+<span class="prompt">&gt;&gt; Iteration 3/100</span>
+<span class="dim">   Tool: run_benchmark</span>  <span class="info">{"profile": "balanced"}</span>
+<span class="ok">   Concurrency 1:  784.57 tok/s median  |  TTFT 31.5ms  |  ITL 1.2ms  |  100% success</span>
+<span class="ok">   Concurrency 50: 11,738 tok/s median  |  TTFT 70.8ms  |  ITL 2.2ms  |  98.8% success</span>
+<span class="warn">   &rarr; Saved: benchmark_results/balanced_20260425_150613.json</span>
+
+<span class="prompt">&gt;&gt; Iteration 9/100</span>
+<span class="dim">   Tool: create_vllm_pod</span>  <span class="info">{"vllm_args": ["--enable-chunked-prefill"]}</span>
+<span class="ok">   Pod: vllm-tune-1777144117  Endpoint: http://localhost:8001</span>
+
+<span class="prompt">&gt;&gt; Iteration 13/100</span>
+<span class="dim">   Tool: compare_benchmarks</span>  <span class="info">baseline vs chunked-prefill</span>
+<span class="err">   Concurrency 50: 15 regressions, 6 improvements</span>
+<span class="err">   TTFT P95: 138ms &rarr; 156ms (+12.5%)  TTFT P99: 158ms &rarr; 175ms (+10.4%)</span>
+<span class="warn">   Verdict: NOT beneficial for this workload</span>
+
+<span class="prompt">&gt;&gt; Iteration 15/100</span>
+<span class="dim">   Tool: create_vllm_pod</span>  <span class="info">{"vllm_args": ["--gpu-memory-utilization", "0.95"]}</span>
+<span class="ok">   Pod: vllm-tune-1777144304  Endpoint: http://localhost:8002</span>
+
+<span class="prompt">&gt;&gt; Iteration 18/100</span>
+<span class="dim">   Tool: compare_benchmarks</span>  <span class="info">baseline vs gpu-mem-0.95</span>
+<span class="ok">   Throughput: 11,739 &rarr; 12,254 tok/s (+4.4%)  100% success rate (vs 98.8%)</span>
+
+<span class="prompt">&gt;&gt; Iteration 20/100</span>
+<span class="dim">   Tool: create_vllm_pod</span>  <span class="info">{"vllm_args": ["--gpu-memory-utilization", "0.95", "--enable-prefix-caching"]}</span>
+<span class="ok">   Pod: vllm-tune-1777144451  Endpoint: http://localhost:8003</span>
+
+<span class="prompt">&gt;&gt; Iteration 23/100</span>
+<span class="dim">   Tool: compare_benchmarks</span>  <span class="info">baseline vs gpu-mem-0.95+prefix-caching</span>
+<span class="ok">   Throughput: 11,739 &rarr; 14,092 tok/s</span> <span class="metric-val">(+20.1%)</span>
+<span class="ok">   TTFT P50:  70.8ms &rarr; 65.9ms (-6.9%)  ITL P50: 2.18ms &rarr; 1.98ms (-9.4%)</span>
+<span class="ok">   Latency:   352ms &rarr; 317ms (-10.1%)</span>
+
+<span class="prompt">&gt;&gt; Iteration 25/100</span>
+<span class="dim">   Tool: done</span>  <span class="ok">{"success": true}</span></div>
+</div>
+
+<!-- ==================== Slide 8: Experiment Comparison Table ==================== -->
+<div class="slide slide-8" id="slide-8">
+  <div class="slide-number">8 / 10</div>
+  <h2>Experiment Results (Concurrency 50)</h2>
+  <p style="color: #888; margin-bottom: 24px; margin-top: -20px;">Real H100 benchmark data &mdash; facebook/opt-125m, balanced profile (ISL=128, OSL=128)</p>
+  <table class="results-table">
+    <thead>
+      <tr>
+        <th>Configuration</th>
+        <th>Throughput (tok/s)</th>
+        <th>TTFT P50</th>
+        <th>ITL P50</th>
+        <th>TPOT P50</th>
+        <th>Latency P50</th>
+        <th>Success Rate</th>
+        <th>Verdict</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr style="background: rgba(255,255,255,0.03);">
+        <td class="config-cell">Baseline (default args)</td>
+        <td>11,739</td>
+        <td>70.8ms</td>
+        <td>2.18ms</td>
+        <td>2.75ms</td>
+        <td>352ms</td>
+        <td>98.8%</td>
+        <td class="neutral">&mdash;</td>
+      </tr>
+      <tr>
+        <td class="config-cell">--enable-chunked-prefill</td>
+        <td>11,773 <span class="neutral">(+0.3%)</span></td>
+        <td>71.7ms <span class="regressed">(+1.3%)</span></td>
+        <td>2.11ms <span class="improved">(-3.4%)</span></td>
+        <td>2.76ms <span class="neutral">(+0.4%)</span></td>
+        <td>354ms <span class="neutral">(+0.5%)</span></td>
+        <td>98.9%</td>
+        <td class="regressed">Mixed / Rejected</td>
+      </tr>
+      <tr style="background: rgba(255,255,255,0.03);">
+        <td class="config-cell">--gpu-memory-utilization 0.95</td>
+        <td>12,254 <span class="improved">(+4.4%)</span></td>
+        <td>69.3ms <span class="improved">(-2.1%)</span></td>
+        <td>2.05ms <span class="improved">(-6.0%)</span></td>
+        <td>2.57ms <span class="improved">(-6.3%)</span></td>
+        <td>330ms <span class="improved">(-6.4%)</span></td>
+        <td class="improved">100%</td>
+        <td class="improved">Improved</td>
+      </tr>
+      <tr>
+        <td class="config-cell" style="color: #6bff6b;">--gpu-memory-utilization 0.95<br>--enable-prefix-caching</td>
+        <td><strong class="improved">14,092 (+20.1%)</strong></td>
+        <td class="improved">65.9ms (-6.9%)</td>
+        <td class="improved">1.98ms (-9.4%)</td>
+        <td class="improved">2.47ms (-10.0%)</td>
+        <td class="improved">317ms (-10.1%)</td>
+        <td>99.1%</td>
+        <td class="improved" style="font-size: 16px;">&#x2705; Best</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <div style="margin-top: 28px; display: flex; gap: 16px;">
+    <div class="metric"><div class="value">+20.1%</div><div class="label">Throughput Gain</div></div>
+    <div class="metric"><div class="value">-6.9%</div><div class="label">TTFT Reduction</div></div>
+    <div class="metric"><div class="value">-9.4%</div><div class="label">ITL Reduction</div></div>
+    <div class="metric"><div class="value">-10.1%</div><div class="label">Latency Reduction</div></div>
+    <div class="metric-blue metric"><div class="value">3</div><div class="label">Experiments Run</div></div>
+    <div class="metric-blue metric"><div class="value">25</div><div class="label">Agent Iterations</div></div>
+  </div>
+</div>
+
+<!-- ==================== Slide 9: Cost & Efficiency ==================== -->
+<div class="slide slide-9" id="slide-9">
+  <div class="slide-number">9 / 10</div>
+  <h2>Cost &amp; Efficiency</h2>
+  <div class="two-col">
+    <div>
+      <h3>Claude API Usage (Actual Run)</h3>
+      <div style="margin-bottom: 20px;">
+        <div class="metric-blue metric"><div class="value">294,686</div><div class="label">Input Tokens</div></div>
+        <div class="metric-blue metric"><div class="value">3,159</div><div class="label">Output Tokens</div></div>
+        <div class="metric-blue metric"><div class="value">26</div><div class="label">API Calls</div></div>
+      </div>
+      <div>
+        <div class="metric"><div class="value">$0.93</div><div class="label">Total Cost (Full Tuning Session)</div></div>
+      </div>
+      <h3 style="margin-top: 24px;">Why So Cheap?</h3>
+      <div class="card">
+        <p>The system prompt (~5K tokens) is marked with <code>cache_control: ephemeral</code>. Across 26 API calls, it's only billed at full price once &mdash; subsequent calls use cached input. This gives us 90%+ cache hit rate on the prompt.</p>
+      </div>
+    </div>
+    <div>
+      <h3>Agent Summary (Actual Output)</h3>
+      <div class="terminal" style="font-size: 11px; line-height: 1.5; max-height: 460px;"><span class="info">FINAL RECOMMENDATIONS:</span>
+
+<span class="dim">1.</span> <span class="ok">Deploy with:</span>
+   --gpu-memory-utilization 0.95
+   --enable-prefix-caching
+
+<span class="dim">2.</span> <span class="ok">Performance gains:</span>
+   20% throughput increase with improved latency
+
+<span class="dim">3.</span> <span class="ok">Why it works:</span>
+   Higher GPU memory utilization increases
+   KV cache capacity, while prefix caching
+   reduces redundant computation for
+   repeated patterns
+
+<span class="dim">4.</span> <span class="ok">Production readiness:</span>
+   Excellent success rates (&gt;99%) with
+   substantial performance improvements
+
+<span class="info">NEXT STEPS IF CONTINUING:</span>
+<span class="dim">-</span> Test --max-num-seqs for higher concurrency
+<span class="dim">-</span> Experiment with --max-num-batched-tokens
+<span class="dim">-</span> Consider tensor parallelism if multi-GPU</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 10: Thank You ==================== -->
+<div class="slide slide-10" id="slide-10">
+  <div class="slide-number">10 / 10</div>
+  <div style="text-align: center;">
+    <h1>Thank You</h1>
+    <p class="subtitle" style="margin-bottom: 40px;">Autonomous vLLM Performance Tuning Agent</p>
+    <div style="display: flex; gap: 20px; justify-content: center; margin-bottom: 40px; flex-wrap: wrap;">
+      <div class="metric"><div class="value">+20.1%</div><div class="label">Throughput Gain</div></div>
+      <div class="metric-blue metric"><div class="value">13</div><div class="label">Agent Tools</div></div>
+      <div class="metric-blue metric"><div class="value">120+</div><div class="label">Log Parse Patterns</div></div>
+      <div class="metric"><div class="value">$0.93</div><div class="label">Total Agent Cost</div></div>
+      <div class="metric-blue metric"><div class="value">0</div><div class="label">Pods Harmed</div></div>
+    </div>
+    <div style="display: flex; gap: 16px; justify-content: center; margin-bottom: 36px;">
+      <div class="team-member"><div class="name">Aanya Sharma</div><div class="role">Agent Architecture</div></div>
+
+      <div class="team-member"><div class="name">Rohan Awhad</div><div class="role">Evaluation Harness</div></div>
+      <div class="team-member"><div class="name">Thameem Ibrahim</div><div class="role">Infrastructure</div></div>
+    </div>
+    <p style="color: #555; font-size: 14px;">
+      github.com/aas008/toa-vllm-hackathon
+    </p>
+  </div>
+</div>
+
+<!-- Navigation -->
+<div class="nav">
+  <button onclick="prevSlide()">&#8592;</button>
+  <button onclick="nextSlide()">&#8594;</button>
+</div>
+<div class="progress" id="progress"></div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  let current = 0;
+
+  // Check for ?view=scroll in URL
+  const params = new URLSearchParams(window.location.search);
+  if (params.get('view') === 'scroll') {
+    document.body.classList.add('scroll-mode');
+  }
+
+  function showSlide(n) {
+    slides[current].classList.remove('active');
+    current = (n + slides.length) % slides.length;
+    slides[current].classList.add('active');
+    document.getElementById('progress').style.width =
+      ((current + 1) / slides.length * 100) + '%';
+  }
+
+  function nextSlide() { showSlide(current + 1); }
+  function prevSlide() { showSlide(current - 1); }
+
+  document.addEventListener('keydown', (e) => {
+    if (document.body.classList.contains('scroll-mode')) return;
+    if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); nextSlide(); }
+    if (e.key === 'ArrowLeft') { e.preventDefault(); prevSlide(); }
+  });
+
+  // Initialize progress bar
+  document.getElementById('progress').style.width =
+    (1 / slides.length * 100) + '%';
+</script>
+</body>
+</html>
