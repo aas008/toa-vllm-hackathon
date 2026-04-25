@@ -1,0 +1,80 @@
+# Default vLLM Tuning Settings
+#
+# Benchmark profiles and tunable parameter ranges for the agent.
+
+# Benchmark Profiles (from LLM-inference-benchmark-guide)
+profiles:
+  balanced:
+    input_sequence_length: 1000
+    output_sequence_length: 1000
+    description: "Balanced workload"
+  decode_heavy:
+    input_sequence_length: 512
+    output_sequence_length: 2048
+    description: "Decode-heavy workload (long generation)"
+  prefill_heavy:
+    input_sequence_length: 2048
+    output_sequence_length: 128
+    description: "Prefill-heavy workload (long context input)"
+  long_context:
+    input_sequence_length: 8000
+    output_sequence_length: 1000
+    description: "Long-context workload"
+
+# Concurrency sweep levels
+concurrency_levels: [1, 50, 100, 200, 300, 500, 650]
+
+# vLLM Tunable Parameters (ranges and defaults)
+tunable_params:
+  max_num_seqs:
+    default: 256
+    range: [1, 1024]
+    description: "Maximum number of sequences per iteration"
+  max_num_batched_tokens:
+    default: null  # auto
+    range: [256, 32768]
+    description: "Maximum number of batched tokens per iteration"
+  gpu_memory_utilization:
+    default: 0.90
+    range: [0.80, 0.95]
+    description: "Fraction of GPU memory for KV cache"
+  enable_chunked_prefill:
+    default: false
+    description: "Enable chunked prefill for long sequences"
+  enable_prefix_caching:
+    default: false
+    description: "Enable automatic prefix caching"
+  max_model_len:
+    default: null  # auto from model config
+    description: "Maximum model context length"
+  enforce_eager:
+    default: false
+    description: "Disable CUDA graphs, use eager mode"
+  tensor_parallel_size:
+    default: 1
+    range: [1, 8]
+    description: "Number of GPUs for tensor parallelism"
+  quantization:
+    default: null
+    options: [null, "fp8", "awq", "gptq"]
+    description: "Quantization method"
+  scheduling_policy:
+    default: "fcfs"
+    options: ["fcfs", "priority"]
+    description: "Request scheduling policy"
+
+# Output metrics to track
+metrics:
+  - throughput_tok_per_sec
+  - ttft_p50
+  - ttft_p95
+  - ttft_p99
+  - itl_p50
+  - itl_p95
+  - itl_p99
+  - tpot_p50
+  - tpot_p95
+  - tpot_p99
+
+# Regression detection threshold
+regression_threshold: 0.02  # 2%

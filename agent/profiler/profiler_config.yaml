@@ -1,0 +1,16 @@
+# vLLM Profiler Configuration
+#
+# SOURCE: vllm-profiler/profiler_config.yaml (verbatim)
+#
+# Configures the PyTorch profiler behavior when injected into vLLM.
+#
+# Settings to include:
+#   - activities: [CPU, CUDA]
+#   - schedule: wait/warmup/active/repeat counts
+#   - record_shapes: true
+#   - profile_memory: true
+#   - with_stack: true
+#   - output_dir: /tmp/vllm_traces/
+#   - export_chrome_trace: true
+#
+# TODO: Copy verbatim from vllm-profiler/profiler_config.yaml
