@@ -55,6 +55,7 @@ class PodManager:
         self.base_yaml_path = base_pod_yaml_path
         self.base_port = base_port
         self.active_pods: dict[str, dict] = {}  # pod_name -> {"port_forward_proc": ..., "local_port": ...}
+        self.active_benchmark_pods: dict[str, dict] = {}  # pod_name -> metadata
         self._next_port = base_port
 
         # Load and validate the template once
@@ -258,17 +259,201 @@ class PodManager:
             print(f"   Warning: Failed to delete pod {pod_name}: {result.stderr}", flush=True)
 
     def cleanup_all(self) -> None:
-        """Delete all active experiment pods. Called at agent exit."""
+        """Delete all active experiment and benchmark pods. Called at agent exit."""
         pod_names = list(self.active_pods.keys())
-        if not pod_names:
+        bench_names = list(self.active_benchmark_pods.keys())
+
+        if not pod_names and not bench_names:
             return
 
-        print(f">> PodManager: Cleaning up {len(pod_names)} experiment pod(s)...", flush=True)
+        total = len(pod_names) + len(bench_names)
+        print(f">> PodManager: Cleaning up {total} pod(s)...", flush=True)
         for pod_name in pod_names:
             try:
                 self.delete_pod(pod_name)
             except Exception as e:
                 print(f"   Warning: cleanup failed for {pod_name}: {e}", flush=True)
+        for pod_name in bench_names:
+            try:
+                self.delete_benchmark_pod(pod_name)
+            except Exception as e:
+                print(f"   Warning: cleanup failed for {pod_name}: {e}", flush=True)
+
+    # ── Benchmark Pod Management ───────────────────────────────────────────
+
+    GUIDELLM_IMAGE = "ghcr.io/vllm-project/guidellm:v0.5.1"
+
+    def _get_pod_ip(self, pod_name: str) -> str:
+        """Get the cluster IP of a running pod."""
+        cmd = self._build_oc_base() + [
+            "get", "pod", pod_name,
+            "-o", "jsonpath={.status.podIP}",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        if result.returncode != 0 or not result.stdout.strip():
+            raise RuntimeError(f"Cannot get IP for pod {pod_name}: {result.stderr}")
+        return result.stdout.strip()
+
+    def create_benchmark_pod(
+        self,
+        target_pod_name: str,
+        model: str,
+        prompt_tokens: int,
+        output_tokens: int,
+        concurrency: str,
+        max_seconds: int = 30,
+    ) -> str:
+        """Create a GuideLLM benchmark pod targeting a vLLM pod.
+
+        Returns the benchmark pod name.
+        """
+        pod_ip = self._get_pod_ip(target_pod_name)
+        target_url = f"http://{pod_ip}:8000"
+
+        # GuideLLM uses --model for both API requests and HF tokenizer lookup
+        hf_model = model
+        if hf_model.startswith("/models/"):
+            hf_model = hf_model[len("/models/"):]
+
+        ts = int(time.time())
+        bench_pod_name = f"guidellm-bench-{ts}"
+
+        manifest = {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": bench_pod_name,
+                "namespace": self.namespace,
+                "labels": {
+                    "app": "guidellm-bench",
+                    "vllm-experiment": "true",
+                },
+            },
+            "spec": {
+                "restartPolicy": "Never",
+                "containers": [{
+                    "name": "guidellm",
+                    "image": self.GUIDELLM_IMAGE,
+                    "command": ["/bin/sh", "-c",
+                        " ".join([
+                            "guidellm", "benchmark",
+                            "--target", target_url,
+                            "--model", hf_model,
+                            "--profile", "concurrent",
+                            "--rate", concurrency,
+                            f"--data", f"prompt_tokens={prompt_tokens},output_tokens={output_tokens}",
+                            "--max-seconds", str(max_seconds),
+                            "--request-type", "text_completions",
+                            "--output-dir", "/tmp/results",
+                            "--outputs", "benchmark.json",
+                        ])
+                        + " && echo 'BENCHMARK_DONE' && sleep 300"
+                    ],
+                    "env": [{"name": "HF_HOME", "value": "/tmp/hf-cache"}],
+                    "volumeMounts": [
+                        {"name": "hf-cache", "mountPath": "/tmp/hf-cache"},
+                    ],
+                    "resources": {
+                        "requests": {"cpu": "1", "memory": "2Gi"},
+                        "limits": {"cpu": "2", "memory": "4Gi"},
+                    },
+                }],
+                "volumes": [
+                    {"name": "hf-cache", "emptyDir": {}},
+                ],
+            },
+        }
+
+        print(f">> PodManager: Creating benchmark pod {bench_pod_name}", flush=True)
+        print(f"   Target: {target_url} (pod {target_pod_name})", flush=True)
+        print(f"   Concurrency: {concurrency}, ISL={prompt_tokens}, OSL={output_tokens}", flush=True)
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yaml", prefix=f"{bench_pod_name}_", delete=False
+        ) as tmp:
+            yaml.dump(manifest, tmp, default_flow_style=False)
+            tmp_path = tmp.name
+
+        try:
+            apply_cmd = self._build_oc_base() + ["apply", "-f", tmp_path]
+            result = subprocess.run(apply_cmd, capture_output=True, text=True, timeout=30)
+            if result.returncode != 0:
+                raise RuntimeError(f"oc apply failed: {result.stderr}")
+        finally:
+            os.unlink(tmp_path)
+
+        self.active_benchmark_pods[bench_pod_name] = {
+            "target_pod": target_pod_name,
+            "target_url": target_url,
+        }
+
+        return bench_pod_name
+
+    def wait_for_pod_completion(self, pod_name: str, timeout: int = 600, poll_interval: int = 10) -> bool:
+        """Wait for benchmark pod to finish.
+
+        The pod runs `guidellm ... && echo BENCHMARK_DONE && sleep 300`,
+        so it stays Running after completion. We poll logs for the marker.
+        """
+        oc_base = self._build_oc_base()
+        deadline = time.time() + timeout
+
+        while time.time() < deadline:
+            phase_cmd = oc_base + [
+                "get", "pod", pod_name,
+                "-o", "jsonpath={.status.phase}",
+            ]
+            phase_result = subprocess.run(phase_cmd, capture_output=True, text=True, timeout=15)
+            phase = phase_result.stdout.strip()
+
+            if phase == "Failed":
+                logs = self._get_pod_logs(pod_name, tail=50)
+                raise RuntimeError(f"Benchmark pod {pod_name} failed.\nLogs:\n{logs}")
+
+            if phase == "Succeeded":
+                print(f"   Benchmark pod {pod_name} completed.", flush=True)
+                return True
+
+            if phase == "Running":
+                logs = self._get_pod_logs(pod_name, tail=5)
+                if "BENCHMARK_DONE" in logs:
+                    print(f"   Benchmark pod {pod_name} completed.", flush=True)
+                    return True
+
+            time.sleep(poll_interval)
+
+        raise TimeoutError(f"Benchmark pod {pod_name} not done after {timeout}s (phase: {phase})")
+
+    def copy_results_from_pod(self, bench_pod_name: str, remote_path: str, local_path: str) -> str:
+        """Copy results from the benchmark pod (still Running due to post-benchmark sleep)."""
+        os.makedirs(os.path.dirname(local_path) or ".", exist_ok=True)
+
+        cmd = self._build_oc_base() + [
+            "cp", f"{bench_pod_name}:{remote_path}", local_path,
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            raise RuntimeError(f"oc cp failed: {result.stderr}")
+
+        print(f"   Results copied to {local_path}", flush=True)
+        return local_path
+
+    def delete_benchmark_pod(self, pod_name: str) -> None:
+        """Delete a benchmark pod."""
+        self.active_benchmark_pods.pop(pod_name, None)
+
+        delete_cmd = self._build_oc_base() + ["delete", "pod", pod_name, "--grace-period=0"]
+        result = subprocess.run(delete_cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode == 0:
+            print(f"   Benchmark pod {pod_name} deleted.", flush=True)
+        else:
+            print(f"   Warning: Failed to delete benchmark pod {pod_name}: {result.stderr}", flush=True)
+
+    def _get_pod_logs(self, pod_name: str, tail: int = 50) -> str:
+        """Get last N lines of pod logs."""
+        cmd = self._build_oc_base() + ["logs", pod_name, f"--tail={tail}"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return result.stdout if result.returncode == 0 else result.stderr
 
     def get_active_pods(self) -> dict[str, dict]:
         """Return info about active experiment pods."""

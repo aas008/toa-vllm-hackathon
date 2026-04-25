@@ -20,6 +20,7 @@ class AgentState:
     current_results: dict = field(default_factory=dict)
     actions_taken: list = field(default_factory=list)
     kernel_analysis: dict = field(default_factory=dict)
+    prometheus_metrics: list = field(default_factory=list)
     done: bool = False
     success: bool = False
     summary: str = ""
@@ -39,7 +40,8 @@ TOOLS AVAILABLE:
 - run_command: Execute shell commands on the vLLM pod/host (runs REMOTELY on pod)
 - read_file: Read files from the vLLM pod/host (runs REMOTELY on pod)
 - write_file: Write files to the vLLM pod/host (runs REMOTELY on pod)
-- run_benchmark: Run GuideLLM benchmark (runs LOCALLY, hits the port-forwarded endpoint)
+- run_benchmark: Run GuideLLM benchmark (launches a benchmark pod on the cluster)
+- scrape_vllm_metrics: Scrape Prometheus /metrics from vLLM endpoint — gauges, counters, histograms (runs LOCALLY)
 - fetch_vllm_logs: Fetch + parse vLLM logs from pod with 120+ regex patterns (runs REMOTELY)
 - read_benchmark_results: Read a GuideLLM JSON file and extract structured metrics (runs LOCALLY)
 - compare_benchmarks: Compare two benchmark JSON files to detect regressions (runs LOCALLY)
@@ -54,8 +56,8 @@ ARCHITECTURE:
 - For each tuning experiment, create a NEW pod with create_vllm_pod.
 - run_command/read_file/write_file/fetch_vllm_logs execute INSIDE a pod.
   Pass pod_name to target an experiment pod; omit to target the baseline pod.
-- run_benchmark runs LOCALLY. Pass endpoint from create_vllm_pod to benchmark
-  an experiment pod; omit endpoint to benchmark the baseline.
+- run_benchmark launches a GuideLLM pod on the cluster. Pass endpoint from
+  create_vllm_pod to benchmark an experiment pod; omit to benchmark the baseline.
 - run_benchmark model is AUTO-FILLED — just specify the profile name (and endpoint if experiment).
 
 TUNING WORKFLOW (follow this order strictly):
@@ -109,6 +111,11 @@ After EVERY run_benchmark call, you MUST do BOTH of these before making any deci
 2. CALL read_benchmark_results with the JSON path from run_benchmark output:
    This returns structured per-concurrency metrics: success rate, throughput,
    TTFT, ITL, TPOT with P50/P95/P99 percentiles.
+
+NOTE: run_benchmark AUTOMATICALLY scrapes Prometheus /metrics before and after
+each run. The delta (gauges, counter increments, histogram distributions) is
+appended to the benchmark output. Use scrape_vllm_metrics for ad-hoc inspection
+or to compare metrics across different time windows.
 
 AFTER TUNING, use compare_benchmarks:
    Pass the baseline JSON path and the post-tuning JSON path to get a side-by-side
@@ -164,6 +171,9 @@ ANALYSIS GUIDELINES:
 - If OOM errors: reduce gpu-memory-utilization or max-num-seqs, or try
   --kv-cache-dtype fp8 to reduce cache memory
 - If all requests error: check vLLM health, model loading, port-forwarding
+- Prometheus: gpu_cache_usage_perc near 1.0 = KV cache full → increase gpu-memory-utilization
+  or reduce max-num-seqs. num_preemptions_total rising = scheduler evicting sequences → reduce load.
+  num_requests_waiting high = requests queuing → throughput bottleneck.
 
 STOPPING CRITERIA:
 - Keep running experiments until you have had 10 CONSECUTIVE experiments with NO

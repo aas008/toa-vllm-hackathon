@@ -354,13 +354,15 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "run_benchmark",
         "description": (
-            "Run a GuideLLM benchmark against the vLLM endpoint from the LOCAL machine. "
-            "This measures throughput (tokens/sec), TTFT, ITL, and TPOT at P50/P95/P99. "
+            "Run a GuideLLM benchmark against the vLLM endpoint. "
+            "Launches a benchmark pod on the cluster that sends requests to the vLLM pod. "
+            "Measures throughput (tokens/sec), TTFT, ITL, and TPOT at P50/P95/P99. "
             "Choose a profile to set ISL/OSL and concurrency for the load pattern. "
-            "Profiles: balanced (ISL=1000,OSL=1000), decode_heavy (ISL=512,OSL=2048), "
-            "prefill_heavy (ISL=2048,OSL=128), long_context (ISL=8000,OSL=1000). "
+            "Profiles: balanced (ISL=128,OSL=128), decode_heavy (ISL=128,OSL=512), "
+            "prefill_heavy (ISL=512,OSL=64), long_context (ISL=1024,OSL=128). "
             "The benchmark takes 2-10 minutes depending on max-seconds. "
-            "Results are saved as JSON and a summary is returned."
+            "Results are saved as JSON and a summary is returned. "
+            "Prometheus /metrics are auto-scraped before and after the benchmark."
         ),
         "input_schema": {
             "type": "object",
@@ -626,6 +628,48 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "scrape_vllm_metrics",
+        "description": (
+            "Scrape Prometheus metrics from a vLLM endpoint's /metrics page. "
+            "vLLM exposes gauges (requests running/waiting, GPU/CPU cache usage), "
+            "counters (preemptions, tokens processed, successful requests), "
+            "and histograms (TTFT, TPOT, e2e latency, model forward/execute time). "
+            "Call this BEFORE and AFTER a benchmark to get a delta showing what "
+            "happened during the run. Provide a label to tag each snapshot, then "
+            "use compare_with to compute the delta. "
+            "NOTE: run_benchmark auto-scrapes /metrics before and after each run, "
+            "so use this tool only for ad-hoc inspection or cross-experiment comparison. "
+            "Runs LOCALLY (hits the port-forwarded endpoint)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "endpoint": {
+                    "type": "string",
+                    "description": (
+                        "vLLM endpoint URL (e.g. 'http://localhost:8000'). "
+                        "If omitted, uses the baseline endpoint."
+                    ),
+                },
+                "label": {
+                    "type": "string",
+                    "description": (
+                        "Label for this snapshot (e.g. 'pre_baseline', 'after_chunked_prefill'). "
+                        "Used to identify snapshots when computing deltas."
+                    ),
+                },
+                "compare_with": {
+                    "type": "string",
+                    "description": (
+                        "Label of a previous snapshot to compare against. "
+                        "If provided, returns the delta between that snapshot and this one."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
         "name": "done",
         "description": (
             "Signal that the tuning session is complete. Call this when you have "
@@ -807,11 +851,14 @@ def _handle_run_benchmark(
     args: dict,
     _executor: RemoteExecutor,
     command_history: list[dict],
+    *,
+    pod_manager: Optional[PodManager] = None,
+    baseline_pod_name: Optional[str] = None,
 ) -> ToolResult:
-    """Run a GuideLLM benchmark from the LOCAL machine against the vLLM endpoint.
+    """Run a GuideLLM benchmark against the vLLM endpoint.
 
-    This does NOT run on the remote pod/host -- it runs locally using subprocess
-    because GuideLLM sends HTTP requests to the vLLM endpoint.
+    When pod_manager is available (oc-mode with --pod-template), launches a
+    GuideLLM pod on the cluster. Otherwise falls back to local subprocess.
     """
     profile_name = args["profile"]
     endpoint = args["endpoint"]
@@ -829,23 +876,124 @@ def _handle_run_benchmark(
 
     profile = BENCHMARK_PROFILES[profile_name]
 
-    # Build output path
     import datetime
+    import os
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     output_path = args.get("output_path") or f"./benchmark_results/{profile_name}_{timestamp}.json"
-
-    # Ensure output directory exists
-    import os
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
-    # Build GuideLLM command (runs locally, targets the vLLM endpoint)
-    # Target URL must end with /v1 for OpenAI-compatible API
+    command_history.append({
+        "tool": "run_benchmark",
+        "profile": profile_name,
+        "concurrency": concurrency,
+        "endpoint": endpoint,
+        "model": model,
+    })
+
+    # Auto-scrape Prometheus metrics before benchmark
+    _pre_metrics = None
+    try:
+        from .analysis.prometheus_metrics import scrape_metrics as _scrape
+        _pre_metrics = _scrape(endpoint, timeout=10)
+    except Exception:
+        pass
+
+    # ── Pod-based benchmark (oc-mode) ─────────────────────────────────
+    if pod_manager is not None:
+        return _run_benchmark_via_pod(
+            args, profile_name, profile, endpoint, model, concurrency,
+            max_seconds, output_path, command_history, _pre_metrics,
+            pod_manager=pod_manager,
+            baseline_pod_name=baseline_pod_name,
+        )
+
+    # ── Fallback: local subprocess ────────────────────────────────────
+    return _run_benchmark_local(
+        args, profile_name, profile, endpoint, model, concurrency,
+        max_seconds, output_path, command_history, _pre_metrics,
+    )
+
+
+def _resolve_target_pod(
+    endpoint: str,
+    pod_manager: PodManager,
+    baseline_pod_name: Optional[str],
+) -> str:
+    """Map an endpoint URL to the vLLM pod name it points to."""
+    for pod_name, info in pod_manager.active_pods.items():
+        if info.get("endpoint") == endpoint:
+            return pod_name
+    if baseline_pod_name:
+        return baseline_pod_name
+    raise ValueError(f"Cannot resolve endpoint {endpoint} to a pod name")
+
+
+def _run_benchmark_via_pod(
+    args, profile_name, profile, endpoint, model, concurrency,
+    max_seconds, output_path, command_history, _pre_metrics,
+    *, pod_manager, baseline_pod_name,
+) -> ToolResult:
+    """Launch a GuideLLM pod on the cluster to run the benchmark."""
+    try:
+        target_pod = _resolve_target_pod(endpoint, pod_manager, baseline_pod_name)
+    except ValueError as e:
+        command_history[-1]["success"] = False
+        return ToolResult(tool="run_benchmark", success=False, output="", error=str(e))
+
+    bench_pod = None
+    try:
+        bench_pod = pod_manager.create_benchmark_pod(
+            target_pod_name=target_pod,
+            model=model,
+            prompt_tokens=profile["isl"],
+            output_tokens=profile["osl"],
+            concurrency=concurrency,
+            max_seconds=max_seconds,
+        )
+
+        bench_timeout = max(max_seconds * len(concurrency.split(",")) + 180, 600)
+        pod_manager.wait_for_pod_completion(bench_pod, timeout=bench_timeout)
+
+        pod_manager.copy_results_from_pod(
+            bench_pod, "/tmp/results/benchmark.json", output_path,
+        )
+
+        return _build_benchmark_result(
+            profile_name, profile, concurrency, max_seconds,
+            output_path, endpoint, command_history, _pre_metrics,
+        )
+
+    except Exception as e:
+        command_history[-1]["success"] = False
+        # Try to get logs for diagnostics
+        logs = ""
+        if bench_pod:
+            try:
+                logs = pod_manager._get_pod_logs(bench_pod, tail=80)
+            except Exception:
+                pass
+        error_msg = f"Benchmark pod failed: {e}"
+        if logs:
+            error_msg += f"\n\n--- Pod logs ---\n{logs}"
+        return ToolResult(tool="run_benchmark", success=False, output="", error=error_msg)
+
+    finally:
+        if bench_pod:
+            try:
+                pod_manager.delete_benchmark_pod(bench_pod)
+            except Exception:
+                pass
+
+
+def _run_benchmark_local(
+    args, profile_name, profile, endpoint, model, concurrency,
+    max_seconds, output_path, command_history, _pre_metrics,
+) -> ToolResult:
+    """Fallback: run GuideLLM locally via subprocess (SSH mode)."""
     target_url = endpoint.rstrip("/")
     if not target_url.endswith("/v1"):
         target_url += "/v1"
 
-    # Derive HuggingFace processor name from model path
-    # e.g. "/models/facebook/opt-125m" -> "facebook/opt-125m"
     processor = args.get("processor", model)
     if processor.startswith("/models/"):
         processor = processor[len("/models/"):]
@@ -876,98 +1024,86 @@ def _handle_run_benchmark(
         "--data", profile["data_flag"],
     ]
 
-    command_str = " ".join(guidellm_cmd)
-
-    command_history.append({
-        "tool": "run_benchmark",
-        "profile": profile_name,
-        "concurrency": concurrency,
-        "endpoint": endpoint,
-        "model": model,
-        "command": command_str,
-    })
-
     try:
-        # GuideLLM can take a long time; allow up to 30 minutes
         bench_timeout = max(max_seconds * len(concurrency.split(",")) + 120, 600)
         result = subprocess.run(
-            guidellm_cmd,
-            capture_output=True,
-            text=True,
-            timeout=bench_timeout,
+            guidellm_cmd, capture_output=True, text=True, timeout=bench_timeout,
         )
-        stdout = result.stdout.replace("\r\n", "\n").replace("\r", "\n")
-        stderr = result.stderr.replace("\r\n", "\n").replace("\r", "\n")
 
         if result.returncode == 0:
-            # Try to read and summarize the JSON output
-            summary_parts = [
-                f"Profile: {profile_name} ({profile['description']})",
-                f"Concurrency levels: {concurrency}",
-                f"Max seconds per level: {max_seconds}",
-                f"Results saved to: {output_path}",
-            ]
-
-            # Parse GuideLLM JSON and extract structured metrics
-            if os.path.exists(output_path):
-                try:
-                    with open(output_path, "r") as f:
-                        bench_data = json.load(f)
-                    metrics_summary = _extract_guidellm_metrics(bench_data)
-                    summary_parts.append("")
-                    summary_parts.append(metrics_summary)
-                except (json.JSONDecodeError, OSError) as e:
-                    summary_parts.append(f"(Could not parse results JSON: {e})")
-
-            # Append last 2000 chars of stdout for context
-            summary_parts.append("")
-            summary_parts.append("--- GuideLLM stdout (last 2000 chars) ---")
-            summary_parts.append(stdout[-2000:] if len(stdout) > 2000 else stdout)
-
-            output_text = "\n".join(summary_parts)
-        else:
-            output_text = (
-                f"GuideLLM exited with code {result.returncode}\n"
-                f"stdout:\n{stdout[-2000:]}\n"
-                f"stderr:\n{stderr[-2000:]}"
+            return _build_benchmark_result(
+                profile_name, profile, concurrency, max_seconds,
+                output_path, endpoint, command_history, _pre_metrics,
+                stdout_tail=result.stdout[-2000:],
             )
-
-        command_history[-1]["success"] = result.returncode == 0
-
-        return ToolResult(
-            tool="run_benchmark",
-            success=result.returncode == 0,
-            output=output_text,
-            error=stderr if result.returncode != 0 else None,
-        )
+        else:
+            stdout = result.stdout.replace("\r\n", "\n").replace("\r", "\n")
+            stderr = result.stderr.replace("\r\n", "\n").replace("\r", "\n")
+            command_history[-1]["success"] = False
+            return ToolResult(
+                tool="run_benchmark", success=False,
+                output=f"GuideLLM exited with code {result.returncode}\nstdout:\n{stdout[-2000:]}\nstderr:\n{stderr[-2000:]}",
+                error=stderr,
+            )
 
     except subprocess.TimeoutExpired:
         command_history[-1]["success"] = False
-        return ToolResult(
-            tool="run_benchmark",
-            success=False,
-            output="",
-            error=f"GuideLLM timed out after {bench_timeout}s",
-        )
+        return ToolResult(tool="run_benchmark", success=False, output="", error=f"GuideLLM timed out after {bench_timeout}s")
     except FileNotFoundError:
         command_history[-1]["success"] = False
-        return ToolResult(
-            tool="run_benchmark",
-            success=False,
-            output="",
-            error=(
-                "GuideLLM is not installed or not on PATH. "
-                "Install with: pip install guidellm"
-            ),
-        )
+        return ToolResult(tool="run_benchmark", success=False, output="", error="GuideLLM not installed. Install with: pip install guidellm")
     except Exception as e:
         command_history[-1]["success"] = False
-        return ToolResult(
-            tool="run_benchmark",
-            success=False,
-            output="",
-            error=f"Failed to run GuideLLM: {e}",
-        )
+        return ToolResult(tool="run_benchmark", success=False, output="", error=f"Failed to run GuideLLM: {e}")
+
+
+def _build_benchmark_result(
+    profile_name, profile, concurrency, max_seconds,
+    output_path, endpoint, command_history, _pre_metrics,
+    stdout_tail="",
+) -> ToolResult:
+    """Build ToolResult from completed benchmark JSON."""
+    import os
+
+    summary_parts = [
+        f"Profile: {profile_name} ({profile['description']})",
+        f"Concurrency levels: {concurrency}",
+        f"Max seconds per level: {max_seconds}",
+        f"Results saved to: {output_path}",
+    ]
+
+    if os.path.exists(output_path):
+        try:
+            with open(output_path, "r") as f:
+                bench_data = json.load(f)
+            metrics_summary = _extract_guidellm_metrics(bench_data)
+            summary_parts.append("")
+            summary_parts.append(metrics_summary)
+        except (json.JSONDecodeError, OSError) as e:
+            summary_parts.append(f"(Could not parse results JSON: {e})")
+
+    # Auto-scrape Prometheus metrics after benchmark
+    if _pre_metrics is not None:
+        try:
+            from .analysis.prometheus_metrics import scrape_metrics as _scrape2, compute_delta
+            _post_metrics = _scrape2(endpoint, timeout=10)
+            _delta = compute_delta(_pre_metrics, _post_metrics)
+            summary_parts.append("")
+            summary_parts.append(_delta.format_summary())
+        except Exception as e:
+            summary_parts.append(f"\n(Prometheus post-scrape failed: {e})")
+
+    if stdout_tail:
+        summary_parts.append("")
+        summary_parts.append("--- GuideLLM stdout (last 2000 chars) ---")
+        summary_parts.append(stdout_tail)
+
+    command_history[-1]["success"] = True
+    return ToolResult(
+        tool="run_benchmark",
+        success=True,
+        output="\n".join(summary_parts),
+    )
 
 
 def _handle_analyze_trace(
@@ -1195,22 +1331,36 @@ def _handle_fetch_vllm_logs(
         "tail_lines": tail_lines,
     })
 
-    # Build the command to fetch logs from the pod
-    if log_source == "file":
-        log_path = args.get("log_path", "/tmp/vllm.log")
-        cmd = f"tail -{tail_lines} {log_path} 2>/dev/null || echo 'Log file not found: {log_path}'"
-    elif log_source == "dmesg":
-        cmd = f"dmesg | tail -{tail_lines} 2>/dev/null || echo 'dmesg not available'"
+    # For OcExecutor in default mode, use oc logs (faster than exec cat /proc/1/fd/1)
+    if log_source == "process" and isinstance(executor, OcExecutor):
+        oc_cmd = ["oc"]
+        if executor.kubeconfig:
+            oc_cmd += ["--kubeconfig", executor.kubeconfig]
+        oc_cmd += ["-n", executor.namespace, "logs", executor.pod_name, f"--tail={tail_lines}"]
+        try:
+            oc_result = subprocess.run(oc_cmd, capture_output=True, text=True, timeout=30)
+            result = CommandResult(
+                stdout=oc_result.stdout,
+                stderr=oc_result.stderr,
+                returncode=oc_result.returncode,
+                success=oc_result.returncode == 0,
+            )
+        except Exception as e:
+            result = CommandResult(stdout="", stderr=str(e), returncode=1, success=False)
     else:
-        # Default: try multiple log sources
-        cmd = (
-            f"(cat /proc/1/fd/1 2>/dev/null | tail -{tail_lines}) || "
-            f"(tail -{tail_lines} /tmp/vllm*.log 2>/dev/null) || "
-            f"(journalctl -u vllm --no-pager -n {tail_lines} 2>/dev/null) || "
-            f"echo 'No vLLM logs found. Try log_source=file with a specific path.'"
-        )
-
-    result = executor.run(cmd, timeout=30)
+        if log_source == "file":
+            log_path = args.get("log_path", "/tmp/vllm.log")
+            cmd = f"tail -{tail_lines} {log_path} 2>/dev/null || echo 'Log file not found: {log_path}'"
+        elif log_source == "dmesg":
+            cmd = f"dmesg | tail -{tail_lines} 2>/dev/null || echo 'dmesg not available'"
+        else:
+            cmd = (
+                f"(tail -{tail_lines} /proc/1/fd/1 2>/dev/null) || "
+                f"(tail -{tail_lines} /tmp/vllm*.log 2>/dev/null) || "
+                f"(journalctl -u vllm --no-pager -n {tail_lines} 2>/dev/null) || "
+                f"echo 'No vLLM logs found. Try log_source=file with a specific path.'"
+            )
+        result = executor.run(cmd, timeout=60)
 
     if not result.success:
         command_history[-1]["success"] = False
@@ -1677,6 +1827,128 @@ def _handle_delete_vllm_pod(
         )
 
 
+def _handle_scrape_vllm_metrics(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+    *,
+    metrics_snapshots: Optional[dict] = None,
+    default_endpoint: str = "http://localhost:8000",
+) -> ToolResult:
+    """Scrape and parse Prometheus metrics from vLLM /metrics endpoint."""
+    from datetime import datetime as _dt
+
+    endpoint = args.get("endpoint") or default_endpoint
+    label = args.get("label", f"snapshot_{_dt.now().strftime('%H%M%S')}")
+    compare_with = args.get("compare_with")
+
+    command_history.append({
+        "tool": "scrape_vllm_metrics",
+        "endpoint": endpoint,
+        "label": label,
+        "compare_with": compare_with,
+    })
+
+    if metrics_snapshots is None:
+        metrics_snapshots = {}
+
+    try:
+        from .analysis.prometheus_metrics import scrape_metrics, compute_delta
+
+        snapshot = scrape_metrics(endpoint, timeout=10)
+        metrics_snapshots[label] = snapshot
+
+        if compare_with and compare_with in metrics_snapshots:
+            before = metrics_snapshots[compare_with]
+            delta = compute_delta(before, snapshot)
+            command_history[-1]["success"] = True
+            return ToolResult(
+                tool="scrape_vllm_metrics",
+                success=True,
+                output=delta.format_summary(),
+            )
+        elif compare_with:
+            lines = [
+                f"WARNING: No previous snapshot labeled '{compare_with}'.",
+                f"Available snapshots: {list(metrics_snapshots.keys())}",
+                "",
+                _format_metrics_snapshot(snapshot, label),
+            ]
+            command_history[-1]["success"] = True
+            return ToolResult(
+                tool="scrape_vllm_metrics",
+                success=True,
+                output="\n".join(lines),
+            )
+        else:
+            command_history[-1]["success"] = True
+            return ToolResult(
+                tool="scrape_vllm_metrics",
+                success=True,
+                output=_format_metrics_snapshot(snapshot, label),
+            )
+
+    except Exception as e:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="scrape_vllm_metrics",
+            success=False,
+            output="",
+            error=f"Failed to scrape metrics from {endpoint}/metrics: {e}",
+        )
+
+
+def _format_metrics_snapshot(snapshot, label: str) -> str:
+    """Format a MetricsSnapshot for agent consumption (vLLM metrics only)."""
+    lines = [
+        "=== VLLM PROMETHEUS METRICS SNAPSHOT ===",
+        f"Endpoint: {snapshot.endpoint}",
+        f"Timestamp: {snapshot.timestamp}",
+        f"Label: {label}",
+    ]
+
+    vllm_gauges = {k: v for k, v in snapshot.gauges.items() if k.startswith("vllm:")}
+    if vllm_gauges:
+        lines.append("\n--- Gauges ---")
+        for name, val in sorted(vllm_gauges.items()):
+            short = name.replace("vllm:", "")
+            if "perc" in name:
+                lines.append(f"  {short}: {val:.1%}")
+            else:
+                lines.append(f"  {short}: {val:.1f}")
+
+    vllm_counters = {k: v for k, v in snapshot.counters.items() if k.startswith("vllm:")}
+    if vllm_counters:
+        lines.append("\n--- Counters (cumulative) ---")
+        for name, val in sorted(vllm_counters.items()):
+            short = name.replace("vllm:", "")
+            lines.append(f"  {short}: {val:,.0f}")
+
+    vllm_histograms = {k: v for k, v in snapshot.histograms.items() if k.startswith("vllm:")}
+    if vllm_histograms:
+        lines.append("\n--- Histograms ---")
+        for name, hist in sorted(vllm_histograms.items()):
+            short = name.replace("vllm:", "")
+            if hist.count == 0:
+                lines.append(f"  {short}: no samples")
+                continue
+            mean = hist.mean
+            p50 = hist.percentile(0.50)
+            p95 = hist.percentile(0.95)
+            p99 = hist.percentile(0.99)
+            if "seconds" in name or "time" in name:
+                fmt = lambda v: f"{v * 1000:.2f}ms" if v is not None else "N/A"
+            else:
+                fmt = lambda v: f"{v:.1f}" if v is not None else "N/A"
+            lines.append(
+                f"  {short}: count={hist.count:.0f}, "
+                f"mean={fmt(mean)}, p50={fmt(p50)}, p95={fmt(p95)}, p99={fmt(p99)}"
+            )
+
+    lines.append(f"\nSnapshot stored as '{label}' for later delta comparison.")
+    return "\n".join(lines)
+
+
 def _handle_done(
     args: dict,
     _executor: RemoteExecutor,
@@ -1716,11 +1988,15 @@ _TOOL_HANDLERS = {
     "check_preemptions": _handle_check_preemptions,
     "create_vllm_pod": _handle_create_vllm_pod,
     "delete_vllm_pod": _handle_delete_vllm_pod,
+    "scrape_vllm_metrics": _handle_scrape_vllm_metrics,
     "done": _handle_done,
 }
 
 # Handlers that accept pod_manager as a keyword argument
-_POD_MANAGER_HANDLERS = {"create_vllm_pod", "delete_vllm_pod"}
+_POD_MANAGER_HANDLERS = {"create_vllm_pod", "delete_vllm_pod", "run_benchmark"}
+
+# Handlers that accept metrics_snapshots + default_endpoint
+_METRICS_HANDLERS = {"scrape_vllm_metrics"}
 
 # Handlers that accept an executor override via pod_name arg
 _POD_AWARE_HANDLERS = {"run_command", "fetch_vllm_logs"}
@@ -1735,32 +2011,11 @@ def dispatch_tool(
     pod_manager: Optional[PodManager] = None,
     namespace: Optional[str] = None,
     kubeconfig: Optional[str] = None,
+    metrics_snapshots: Optional[dict] = None,
+    default_endpoint: str = "http://localhost:8000",
+    baseline_pod_name: Optional[str] = None,
 ) -> ToolResult:
-    """Route a tool call to the appropriate handler.
-
-    Parameters
-    ----------
-    name : str
-        Tool name (must match one of the keys in TOOL_DEFINITIONS).
-    args : dict
-        Tool input arguments from the Claude API response.
-    executor : RemoteExecutor
-        The configured executor (SSHExecutor or OcExecutor) for remote commands.
-    command_history : list[dict] or None
-        Mutable list to track command history across the agent session.
-        If None, a temporary list is used (history is discarded).
-    pod_manager : PodManager or None
-        Pod manager for create/delete pod operations.
-    namespace : str or None
-        OpenShift namespace (used to create temp OcExecutors for experiment pods).
-    kubeconfig : str or None
-        Kubeconfig path (used to create temp OcExecutors for experiment pods).
-
-    Returns
-    -------
-    ToolResult
-        Result of the tool execution.
-    """
+    """Route a tool call to the appropriate handler."""
     if command_history is None:
         command_history = []
 
@@ -1775,7 +2030,18 @@ def dispatch_tool(
 
     # For pod manager tools, pass pod_manager as keyword arg
     if name in _POD_MANAGER_HANDLERS:
-        return handler(args, executor, command_history, pod_manager=pod_manager)
+        kwargs = {"pod_manager": pod_manager}
+        if name == "run_benchmark":
+            kwargs["baseline_pod_name"] = baseline_pod_name
+        return handler(args, executor, command_history, **kwargs)
+
+    # For metrics tools, pass metrics_snapshots and default_endpoint
+    if name in _METRICS_HANDLERS:
+        return handler(
+            args, executor, command_history,
+            metrics_snapshots=metrics_snapshots,
+            default_endpoint=default_endpoint,
+        )
 
     # For pod-aware tools, create a temp OcExecutor if pod_name is specified
     target_executor = executor
@@ -1809,6 +2075,7 @@ class AgentTools:
         pod_manager: Optional[PodManager] = None,
         namespace: Optional[str] = None,
         kubeconfig: Optional[str] = None,
+        baseline_pod_name: Optional[str] = None,
     ):
         self.executor = executor
         self.vllm_endpoint = vllm_endpoint
@@ -1816,7 +2083,9 @@ class AgentTools:
         self.pod_manager = pod_manager
         self.namespace = namespace
         self.kubeconfig = kubeconfig
+        self.baseline_pod_name = baseline_pod_name
         self.command_history: list[dict] = []
+        self.metrics_snapshots: dict = {}
 
     def get_tool_definitions(self) -> list[dict]:
         """Return the tool definitions list for Claude's API."""
@@ -1841,6 +2110,9 @@ class AgentTools:
             pod_manager=self.pod_manager,
             namespace=self.namespace,
             kubeconfig=self.kubeconfig,
+            metrics_snapshots=self.metrics_snapshots,
+            default_endpoint=self.vllm_endpoint,
+            baseline_pod_name=self.baseline_pod_name,
         )
 
     # Convenience methods for direct (non-agent) use

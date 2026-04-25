@@ -64,6 +64,7 @@ class TuningReport:
     agent_summary: str = ""
     token_usage: list = field(default_factory=list)
     decision_log: list = field(default_factory=list)
+    prometheus_metrics: list = field(default_factory=list)
 
 
 class Reporter:
@@ -97,6 +98,7 @@ class Reporter:
             self._performance_results_section(report),
             self._bottlenecks_section(report),
             self._kernel_analysis_section(report),
+            self._prometheus_metrics_section(report),
             self._tuning_applied_section(report),
             self._cost_analysis_section(report),
             self._token_usage_section(report),
@@ -245,6 +247,81 @@ class Reporter:
         lines.extend(["---", ""])
         return "\n".join(lines)
 
+    def _prometheus_metrics_section(self, report: TuningReport) -> str:
+        lines = ["## Prometheus Metrics (vLLM /metrics)", ""]
+        if not report.prometheus_metrics:
+            lines.append("*No Prometheus metrics were collected in this run.*")
+            lines.extend(["", "---", ""])
+            return "\n".join(lines)
+
+        for i, delta in enumerate(report.prometheus_metrics, 1):
+            endpoint = delta.get("endpoint", "unknown")
+            duration = delta.get("duration_seconds", 0)
+            lines.append(f"### Scrape {i} ({endpoint}, {duration:.1f}s interval)")
+            lines.append("")
+
+            gauges = delta.get("gauge_snapshots", {})
+            if gauges:
+                lines.extend([
+                    "#### Server State (Gauges)",
+                    "",
+                    "| Metric | Value |",
+                    "|--------|-------|",
+                ])
+                for name, val in sorted(gauges.items()):
+                    short = name.replace("vllm:", "").replace("vllm_", "")
+                    if "perc" in name:
+                        lines.append(f"| {short} | {val:.1%} |")
+                    else:
+                        lines.append(f"| {short} | {val:.1f} |")
+                lines.append("")
+
+            counter_deltas = delta.get("counter_deltas", {})
+            counter_rates = delta.get("counter_rates", {})
+            if counter_deltas:
+                lines.extend([
+                    "#### Throughput Counters (Delta During Benchmark)",
+                    "",
+                    "| Metric | Delta | Rate (/sec) |",
+                    "|--------|-------|-------------|",
+                ])
+                for name in sorted(counter_deltas.keys()):
+                    short = name.replace("vllm:", "").replace("vllm_", "")
+                    d = counter_deltas[name]
+                    r = counter_rates.get(name, 0)
+                    lines.append(f"| {short} | {d:,.0f} | {r:,.2f} |")
+                lines.append("")
+
+            hist_summaries = delta.get("histogram_summaries", {})
+            if hist_summaries:
+                lines.extend([
+                    "#### Latency Distributions (Histograms)",
+                    "",
+                    "| Metric | P50 | P95 | P99 | Mean |",
+                    "|--------|-----|-----|-----|------|",
+                ])
+                for name, summary in sorted(hist_summaries.items()):
+                    short = name.replace("vllm:", "").replace("vllm_", "")
+                    p50 = summary.get("p50")
+                    p95 = summary.get("p95")
+                    p99 = summary.get("p99")
+                    mean = summary.get("mean")
+                    if "seconds" in name or "time" in name:
+                        def fmt(v):
+                            return f"{v * 1000:.2f}ms" if isinstance(v, (int, float)) else "N/A"
+                    elif "tokens" in name:
+                        def fmt(v):
+                            return f"{v:.0f}" if isinstance(v, (int, float)) else "N/A"
+                    else:
+                        def fmt(v):
+                            return f"{v:.4f}" if isinstance(v, (int, float)) else "N/A"
+                    lines.append(f"| {short} | {fmt(p50)} | {fmt(p95)} | {fmt(p99)} | {fmt(mean)} |")
+                lines.append("")
+
+            lines.extend(["---", ""])
+
+        return "\n".join(lines)
+
     def _tuning_applied_section(self, report: TuningReport) -> str:
         lines = ["## Tuning Applied", ""]
         if report.actions_taken:
@@ -379,5 +456,6 @@ class Reporter:
             "actions_taken": report.actions_taken,
             "token_usage": report.token_usage,
             "decision_log": report.decision_log,
+            "prometheus_metrics": report.prometheus_metrics,
         }
         return json.dumps(data, indent=2)
