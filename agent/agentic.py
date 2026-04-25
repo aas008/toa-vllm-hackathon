@@ -59,6 +59,24 @@ ARCHITECTURE:
 - run_benchmark model is AUTO-FILLED — just specify the profile name (and endpoint if experiment).
 
 TUNING WORKFLOW (follow this order strictly):
+
+0. FIRST, look up the vLLM recipes page for model-specific optimizations:
+   a. Run: run_command with command="curl -s https://recipes.vllm.ai/models.json"
+      This returns a JSON array of all models with recipes. Search for an entry
+      whose "hf_id" matches (or is close to) the model being served.
+   b. If a match is found, fetch the model recipe:
+      run_command with command="curl -s https://recipes.vllm.ai/{hf_id}.json"
+      (e.g. "curl -s https://recipes.vllm.ai/meta-llama/Llama-3.1-8B-Instruct.json")
+   c. The recipe JSON contains:
+      - model.base_args: recommended base vLLM args
+      - variants: precision/quantization options (e.g. fp8, nvfp4) with extra_args
+      - hardware_overrides: hardware-specific args (e.g. for AMD)
+      - features / opt_in_features: optional features to enable
+   d. Use the recipe's recommended args as your FIRST experiment. Then build on
+      top of them with additional tuning.
+   e. If curl fails (no internet on the pod), skip this step and proceed with
+      the known-good practices listed below.
+
 1. Benchmark the BASELINE pod (already running, uses default endpoint):
    a. Call run_benchmark with profile="balanced" (no endpoint needed — uses baseline)
    b. Call fetch_vllm_logs (no pod_name — reads baseline pod logs)
@@ -122,12 +140,29 @@ VLLM TUNABLE PARAMETERS (pass these to create_vllm_pod as vllm_args):
 8. --tensor-parallel-size (1-8, default 1): Multi-GPU parallelism
 9. --quantization (null/fp8/awq/gptq): Quantization method
 10. --scheduling-policy (fcfs/priority): Request scheduling
+11. --kv-cache-dtype (auto/fp8): KV cache data type. fp8 halves cache memory.
+12. --cuda-graph-max-capture-size (int, default ~2048): Max batch size for CUDA graphs
+
+KNOWN-GOOD TUNING PRACTICES (apply these early in your experiments):
+- ALWAYS enable prefix caching (--enable-prefix-caching). It reduces redundant
+  computation for repeated prefixes and almost never hurts performance.
+- Increase --max-num-batched-tokens beyond the default. Larger batch sizes
+  improve GPU utilization and throughput. Try 4096, 8192, or 16384.
+- Increase --max-num-seqs to allow more concurrent sequences when batching.
+- Set --kv-cache-dtype fp8 to use FP8 quantization for the KV cache. This
+  halves KV cache memory usage, allowing more sequences or longer contexts,
+  with minimal accuracy impact.
+- Increase --cuda-graph-max-capture-size (default ~2048). Larger values allow
+  CUDA graphs to cover bigger batch sizes, reducing kernel launch overhead.
+  Try 4096 or 8192.
 
 ANALYSIS GUIDELINES:
 - If TTFT is high: prefill is slow → try chunked-prefill or prefix-caching
 - If ITL is high: decode is slow → check batch size, GPU utilization
-- If throughput plateaus: may need more GPU memory for KV cache
-- If OOM errors: reduce gpu-memory-utilization or max-num-seqs
+- If throughput plateaus: may need more GPU memory for KV cache, or try
+  --kv-cache-dtype fp8 to fit more tokens in cache
+- If OOM errors: reduce gpu-memory-utilization or max-num-seqs, or try
+  --kv-cache-dtype fp8 to reduce cache memory
 - If all requests error: check vLLM health, model loading, port-forwarding
 
 STOPPING CRITERIA:
