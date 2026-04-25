@@ -4,19 +4,116 @@
 
 A CLI-based agentic loop that automatically benchmarks, profiles, analyzes, and tunes a vLLM inference server — then outputs a markdown report.
 
-## Quick Start
+## Prerequisites
+
+- Python 3.10+
+- `oc` CLI (OpenShift) or SSH access to the vLLM host
+- GuideLLM (`pip install guidellm`)
+- Claude API access (direct Anthropic API key or Google Cloud Vertex AI)
+- A running vLLM pod/server with GPU
+
+## Setup
 
 ```bash
+# 1. Clone and install dependencies
+git clone https://github.com/aas008/toa-vllm-hackathon.git
+cd toa-vllm-hackathon
 pip install -r requirements.txt
 
+# 2. Set up cluster access (OpenShift mode)
+export KUBECONFIG=/path/to/your/kubeconfig
+oc login  # or verify: oc whoami
+
+# 3. Deploy vLLM pod (if not already running)
+oc apply -f k8s/model-pvc.yaml
+oc apply -f k8s/model-download-job.yaml   # wait for completion
+oc apply -f aanya-pod.yaml
+
+# 4. Wait for pod to be ready
+oc get pods -n toa-hack -w
+
+# 5. Set up port-forward to the vLLM pod
+oc port-forward -n toa-hack aanya-vllm-test-pod 8000:8000 &
+
+# 6. Verify endpoint
+curl http://localhost:8000/v1/models
+```
+
+## Running the Agent
+
+### OpenShift mode (oc exec)
+
+```bash
+# Using Vertex AI for Claude API
 python -m agent \
-    --vllm-endpoint http://gpu:8000 \
-    --vllm-host aansharm-0-yxg5 \
+    --vllm-endpoint http://localhost:8000 \
+    --model /models/facebook/opt-125m \
+    --oc-mode \
+    --oc-pod aanya-vllm-test-pod \
+    --oc-namespace toa-hack \
+    --kubeconfig /path/to/kubeconfig \
+    --vertex \
+    --vertex-project-id $ANTHROPIC_VERTEX_PROJECT_ID \
+    --vertex-region us-east5 \
+    --max-iterations 15 \
+    --profiles balanced \
+    --output reports/
+
+# Using direct Anthropic API key
+python -m agent \
+    --vllm-endpoint http://localhost:8000 \
+    --model /models/facebook/opt-125m \
+    --oc-mode \
+    --oc-pod aanya-vllm-test-pod \
+    --oc-namespace toa-hack \
+    --kubeconfig /path/to/kubeconfig \
+    --api-key $ANTHROPIC_API_KEY \
+    --max-iterations 15 \
+    --profiles balanced \
+    --output reports/
+```
+
+### SSH mode
+
+```bash
+python -m agent \
+    --vllm-endpoint http://gpu-host:8000 \
+    --vllm-host gpu-host \
+    --ssh-user root \
     --model meta-llama/Llama-3.1-8B \
     --api-key $ANTHROPIC_API_KEY \
     --max-iterations 30 \
     --output reports/
 ```
+
+### CLI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--vllm-endpoint` | (required) | URL of the vLLM server |
+| `--model` | (required) | Model served by vLLM |
+| `--oc-mode` | false | Use `oc exec` instead of SSH |
+| `--oc-pod` | — | Pod name (required with `--oc-mode`) |
+| `--oc-namespace` | toa-hack | OpenShift namespace |
+| `--kubeconfig` | `$KUBECONFIG` | Path to kubeconfig file |
+| `--vllm-host` | — | SSH hostname (required without `--oc-mode`) |
+| `--ssh-user` | root | SSH user |
+| `--api-key` | `$ANTHROPIC_API_KEY` | Anthropic API key |
+| `--vertex` | false | Use Vertex AI for Claude |
+| `--vertex-project-id` | `$ANTHROPIC_VERTEX_PROJECT_ID` | Vertex AI project |
+| `--vertex-region` | us-east5 | Vertex AI region |
+| `--claude-model` | sonnet | Claude model (sonnet/opus/haiku) |
+| `--max-iterations` | 30 | Max agent loop iterations |
+| `--profiles` | all 4 | Benchmark profiles to run |
+| `--output` | reports/ | Output directory |
+
+### Timeouts
+
+| Where | Default | Description |
+|-------|---------|-------------|
+| `--max-iterations` | 30 | Max agent loop turns |
+| `run_benchmark` max_seconds | 120s | GuideLLM benchmark duration per level |
+| `run_command` timeout | 60s | Remote shell command timeout |
 
 ## Architecture
 
