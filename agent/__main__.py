@@ -1,11 +1,5 @@
-"""
-Entry point for: python -m agent
+"""Allow running as: python -m agent"""
+from .main import main
 
-Delegates to main.main() to parse CLI args and start the agent loop.
-
-SOURCE: ai-perf-hackathon/agent/__main__.py (adapted)
-"""
-
-# TODO: Import and call main()
-# from agent.main import main
-# main()
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,21 @@
+# Secrets
+.env
+*.key
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Reports (generated output)
+reports/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
