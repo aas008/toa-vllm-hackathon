@@ -161,26 +161,37 @@ class MetricsDelta:
         }
 
     def format_summary(self) -> str:
-        """Human-readable summary for agent consumption (vLLM metrics only)."""
+        """Verbose human-readable summary for agent consumption (vLLM metrics only)."""
         lines = [
-            f"=== PROMETHEUS METRICS DELTA ===",
+            f"{'='*60}",
+            f"  PROMETHEUS METRICS DELTA (server-side, during benchmark)",
+            f"{'='*60}",
             f"Endpoint: {self.endpoint}",
-            f"Duration: {self.duration_seconds:.1f}s ({self.start_time} -> {self.end_time})",
+            f"Duration: {self.duration_seconds:.1f}s",
         ]
 
+        # ── Gauges ──
         vllm_gauges = {k: v for k, v in self.gauge_snapshots.items() if k.startswith("vllm:")}
         if vllm_gauges:
-            lines.append("\n--- Server State (Gauges) ---")
+            lines.append("\n--- Server State (end-of-benchmark snapshot) ---")
             for name, val in sorted(vllm_gauges.items()):
                 display = _format_metric_name(name)
                 if "perc" in name:
                     lines.append(f"  {display}: {val:.1%}")
                 else:
                     lines.append(f"  {display}: {val:.1f}")
+            # Flag KV cache pressure
+            kv = vllm_gauges.get("vllm:kv_cache_usage_perc", 0)
+            if kv > 0.9:
+                lines.append(f"  ⚠ KV CACHE PRESSURE: {kv:.1%} used — risk of preemptions")
+            waiting = vllm_gauges.get("vllm:num_requests_waiting", 0)
+            if waiting > 0:
+                lines.append(f"  ⚠ QUEUING: {waiting:.0f} requests waiting at snapshot time")
 
+        # ── Counters ──
         vllm_counters = {k: v for k, v in self.counter_deltas.items() if k.startswith("vllm:")}
         if vllm_counters:
-            lines.append("\n--- Throughput (Counter Deltas During Run) ---")
+            lines.append("\n--- Throughput Counters (delta during this benchmark run) ---")
             for name in sorted(vllm_counters.keys()):
                 display = _format_metric_name(name)
                 delta = self.counter_deltas[name]
@@ -190,29 +201,73 @@ class MetricsDelta:
                 else:
                     lines.append(f"  {display}: +{delta:,.0f} ({rate:,.2f}/sec)")
 
+            # Derived: preemption warning
+            preemptions = self.counter_deltas.get("vllm:num_preemptions_total", 0)
+            if preemptions > 0:
+                lines.append(f"  ⚠ PREEMPTIONS: {preemptions:.0f} sequences evicted during run")
+
+            # Derived: token throughput
+            gen_delta = self.counter_deltas.get("vllm:generation_tokens_total", 0)
+            if gen_delta > 0 and self.duration_seconds > 0:
+                lines.append(f"  → Server-side generation throughput: {gen_delta / self.duration_seconds:,.1f} tok/sec")
+
+            # Derived: prefix cache hit rate
+            cache_hits = self.counter_deltas.get("vllm:prefix_cache_hits_total", 0)
+            cache_queries = self.counter_deltas.get("vllm:prefix_cache_queries_total", 0)
+            if cache_queries > 0:
+                hit_rate = cache_hits / cache_queries
+                lines.append(f"  → Prefix cache hit rate: {hit_rate:.1%} ({cache_hits:.0f}/{cache_queries:.0f})")
+
+            # Derived: success rate
+            success = self.counter_deltas.get("vllm:request_success_total", 0)
+            if success > 0:
+                lines.append(f"  → Completed requests (server-side): {success:.0f}")
+
+        # ── Histograms ──
         vllm_hists = {k: v for k, v in self.histogram_summaries.items() if k.startswith("vllm:")}
         if vllm_hists:
-            lines.append("\n--- Latency Distributions (Histograms) ---")
+            lines.append("\n--- Latency Distributions (server-side histograms) ---")
+            # Show key latency histograms first
+            key_order = [
+                "vllm:time_to_first_token_seconds",
+                "vllm:inter_token_latency_seconds",
+                "vllm:e2e_request_latency_seconds",
+                "vllm:request_queue_time_seconds",
+                "vllm:request_prefill_time_seconds",
+                "vllm:request_decode_time_seconds",
+                "vllm:request_inference_time_seconds",
+            ]
+            shown = set()
+            for name in key_order:
+                if name in vllm_hists:
+                    shown.add(name)
+                    self._append_histogram_line(lines, name, vllm_hists[name])
             for name, summary in sorted(vllm_hists.items()):
-                display = _format_metric_name(name)
-                count = summary.get("count", 0)
-                if count == 0:
-                    lines.append(f"  {display}: no samples")
-                    continue
-                mean = summary.get("mean")
-                p50 = summary.get("p50")
-                p95 = summary.get("p95")
-                p99 = summary.get("p99")
-                if "seconds" in name or "time" in name:
-                    fmt = lambda v: f"{v * 1000:.2f}ms" if v is not None else "N/A"
-                else:
-                    fmt = lambda v: f"{v:.1f}" if v is not None else "N/A"
-                lines.append(
-                    f"  {display}: count={count:.0f}, "
-                    f"mean={fmt(mean)}, p50={fmt(p50)}, p95={fmt(p95)}, p99={fmt(p99)}"
-                )
+                if name not in shown:
+                    self._append_histogram_line(lines, name, summary)
 
+        lines.append(f"{'='*60}")
         return "\n".join(lines)
+
+    @staticmethod
+    def _append_histogram_line(lines, name, summary):
+        display = _format_metric_name(name)
+        count = summary.get("count", 0)
+        if count == 0:
+            lines.append(f"  {display}: no samples")
+            return
+        mean = summary.get("mean")
+        p50 = summary.get("p50")
+        p95 = summary.get("p95")
+        p99 = summary.get("p99")
+        if "seconds" in name or "time" in name:
+            fmt = lambda v: f"{v * 1000:.2f}ms" if v is not None else "N/A"
+        else:
+            fmt = lambda v: f"{v:.1f}" if v is not None else "N/A"
+        lines.append(
+            f"  {display}: count={count:.0f}, "
+            f"mean={fmt(mean)}, p50={fmt(p50)}, p95={fmt(p95)}, p99={fmt(p99)}"
+        )
 
 
 # ── Parsing ──────────────────────────────────────────────────────────────

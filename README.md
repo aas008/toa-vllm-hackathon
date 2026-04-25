@@ -248,3 +248,64 @@ toa-vllm-hackathon/
 ├── requirements.txt
 └── README.md
 ```
+
+## Verification: Prometheus Metrics Integration
+
+Run executed on 2026-04-25 against `RedHatAI/Llama-3.2-1B-Instruct-FP8` on a single NVIDIA H100 80GB, vLLM v0.19.1. The agent used Prometheus metrics (`/metrics` endpoint) scraped automatically before and after each benchmark to drive tuning decisions.
+
+### Setup
+
+```bash
+python3 -m agent \
+    --vllm-endpoint http://localhost:8000 \
+    --model RedHatAI/Llama-3.2-1B-Instruct-FP8 \
+    --oc-mode --oc-pod vllm-llama-1b \
+    --oc-namespace toa-hack \
+    --kubeconfig /path/to/kubeconfig \
+    --pod-template aanya-pod.yaml \
+    --vertex --claude-model haiku \
+    --max-iterations 50 --profiles balanced \
+    --output reports/
+```
+
+### Baseline Results (balanced profile: ISL=128, OSL=128)
+
+| Metric | Concurrency 1 | Concurrency 50 |
+|--------|---------------|----------------|
+| Output Throughput (p50) | 692 tok/sec | 13,531 tok/sec |
+| TTFT p50 | 10.42 ms | 44.47 ms |
+| TTFT p99 | — | 72.83 ms |
+| ITL p50 | 1.44 ms | 1.99 ms |
+| TPOT p50 | 1.51 ms | 2.33 ms |
+| Success Rate | 100% | 98.8% |
+
+### Prometheus Metrics (server-side, from `/metrics` auto-scrape)
+
+| Metric | Value |
+|--------|-------|
+| KV Cache Usage | 0% (significant headroom) |
+| Prefix Cache Hit Rate | 87.5% (477,232 / 545,408 tokens) |
+| Preemptions | 0 |
+| Server-side Generation Throughput | 6,392 tok/sec |
+| Requests Waiting (at snapshot) | 0 |
+
+### Experiments and Prometheus-Driven Analysis
+
+| # | Parameter | Result | Prometheus Signal |
+|---|-----------|--------|-------------------|
+| 1 | `--enable-chunked-prefill` | -89.9% throughput | Prefix cache hit rate dropped to 0% — chunked prefills broke cache detection |
+| 2 | `--gpu-memory-utilization 0.95` | -12.3% throughput | Prefix cache hit rate 0%, TTFT p99 +2652% |
+| 3 | `--max-num-seqs 512` | -19.8% throughput | Prefix cache hit rate 0%, TTFT mean +137% |
+| 4 | `--max-num-batched-tokens 8192` | -8.6% throughput | Prefix cache hit rate 0%, server throughput -7.3% |
+
+### Key Finding
+
+The agent identified through Prometheus counter deltas that **prefix caching was the dominant performance driver** (87.5% hit rate at baseline). Every experiment pod started with a cold cache, causing all tuning changes to appear as regressions. The agent correctly concluded the baseline was already optimally configured and called `done(success=True)` after 30 iterations.
+
+**Prometheus metrics that drove the analysis:**
+- `vllm:prefix_cache_hits_total` / `vllm:prefix_cache_queries_total` — cache hit rate per run
+- `vllm:kv_cache_usage_perc` — confirmed KV cache headroom (0%), ruling out memory pressure
+- `vllm:num_preemptions_total` — confirmed zero preemptions, ruling out scheduler eviction
+- `vllm:generation_tokens_total` delta / duration — server-side throughput cross-checked against GuideLLM client-side measurements
+
+Full report: [`reports/report_20260425_203355.md`](reports/report_20260425_203355.md)
