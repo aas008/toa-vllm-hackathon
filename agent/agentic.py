@@ -149,13 +149,28 @@ AFTER TUNING, use compare_benchmarks:
    Pass the baseline JSON path and the post-tuning JSON path to get a side-by-side
    comparison with regression detection (2% threshold, metric directionality aware).
 
-IF BENCHMARK FAILS (errored requests > 0):
-- Do NOT call done. Do NOT give up.
-- Call fetch_vllm_logs (with pod_name if experiment) to understand WHY requests are failing
-- Common causes: model not loaded, wrong model name, OOM, CUDA error, timeout
-- Try: run_command "curl -s http://localhost:8000/health" (inside pod, use pod_name for experiment)
-- Try: run_command "curl -s http://localhost:8000/v1/models" (inside pod)
-- If an experiment pod is broken, delete it and try different args
+IF BENCHMARK FAILS (errored requests > 0 OR zero successful requests):
+- Do NOT call done. Do NOT give up. DIAGNOSE from BOTH sides:
+
+1. CHECK VLLM POD LOGS:
+   - fetch_vllm_logs(pod_name=<experiment_pod>) — look for OOM, CUDA error,
+     model loading failure, assertion errors, worker crashes
+   - run_command("curl -s http://localhost:8000/health", pod_name=<pod>)
+   - run_command("curl -s http://localhost:8000/v1/models", pod_name=<pod>)
+
+2. CHECK BENCHMARK POD: If the benchmark reports 0 successful requests,
+   the vLLM pod was likely unreachable or crashed during the run.
+   Common causes:
+   - Pod not ready yet (readiness probe passed but model not fully loaded)
+   - OOM during first request (vLLM args caused too much memory allocation)
+   - Wrong model name in benchmark vs what vLLM serves
+   - Network issue (pod IP changed, port not listening)
+
+3. AFTER DIAGNOSIS:
+   - If OOM: delete pod, try with lower gpu-memory-utilization or fewer seqs
+   - If model error: check --served-model-name matches
+   - If pod crashed: fetch_vllm_logs to see the crash reason, try different args
+   - If timeout: increase benchmark max-seconds
 
 KEY METRICS (from GuideLLM output):
 - Output Token Throughput (tokens/sec) — higher = better
