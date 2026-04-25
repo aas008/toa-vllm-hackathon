@@ -164,32 +164,31 @@ KEY METRICS (from GuideLLM output):
 - TPOT - Time Per Output Token (ms) at P50, P95, P99 — lower = better
 - Request Success Rate (%) — must be > 0 to be useful
 
-VLLM TUNABLE PARAMETERS (pass these to create_vllm_pod as vllm_args):
-1. --max-num-seqs (1-1024, default 256): Max concurrent sequences per iteration
-2. --max-num-batched-tokens (256-32768, default auto): Max tokens per batch
-3. --gpu-memory-utilization (0.80-0.95, default 0.90): GPU memory for KV cache
-4. --enable-chunked-prefill (bool, default false): Chunk long prefills
-5. --enable-prefix-caching (bool, default false): Cache common prefixes
-6. --max-model-len (int, default auto): Max context length
-7. --enforce-eager (bool, default false): Disable CUDA graphs
-8. --tensor-parallel-size (1-8, default 1): Multi-GPU parallelism
-9. --quantization (null/fp8/awq/gptq): Quantization method
-10. --scheduling-policy (fcfs/priority): Request scheduling
-11. --kv-cache-dtype (auto/fp8): KV cache data type. fp8 halves cache memory.
-12. --cuda-graph-max-capture-size (int, default ~2048): Max batch size for CUDA graphs
+VLLM v0.19.1 DEFAULTS (V1 engine — DO NOT test these, they are ALREADY ENABLED):
+- Chunked prefill: ENABLED by default (max_num_batched_tokens=2048 auto-set)
+- Prefix caching (APC): ALWAYS ON in V1 (no flag needed)
+- CUDA graphs: ENABLED (enforce_eager=False)
+- Continuous batching: ALWAYS ON
+- Async scheduling: ALWAYS ON
 
-KNOWN-GOOD TUNING PRACTICES (apply these early in your experiments):
-- ALWAYS enable prefix caching (--enable-prefix-caching). It reduces redundant
-  computation for repeated prefixes and almost never hurts performance.
-- Increase --max-num-batched-tokens beyond the default. Larger batch sizes
-  improve GPU utilization and throughput. Try 4096, 8192, or 16384.
-- Increase --max-num-seqs to allow more concurrent sequences when batching.
-- Set --kv-cache-dtype fp8 to use FP8 quantization for the KV cache. This
-  halves KV cache memory usage, allowing more sequences or longer contexts,
-  with minimal accuracy impact.
-- Increase --cuda-graph-max-capture-size (default ~2048). Larger values allow
-  CUDA graphs to cover bigger batch sizes, reducing kernel launch overhead.
-  Try 4096 or 8192.
+DO NOT pass --enable-chunked-prefill or --enable-prefix-caching — they are no-ops.
+Any performance difference from these flags is noise from cold prefix cache on new pods.
+
+COLD CACHE WARNING: Every experiment pod starts with EMPTY prefix cache.
+Baseline pod has warm cache (87%+ hit rate with repeated patterns). Account
+for this — run benchmarks long enough for cache to warm, or compare counter
+deltas (prefix_cache_hits_total / prefix_cache_queries_total) from Prometheus.
+
+TUNABLE PARAMETERS (these ACTUALLY change behavior):
+1. --max-num-batched-tokens (default 2048): Token budget per iteration. Try 4096, 8192, 16384
+2. --max-num-seqs (default auto): Max concurrent sequences. Try 128, 256, 512
+3. --gpu-memory-utilization (default 0.90): GPU memory for KV cache. Try 0.92, 0.95
+4. --max-model-len (default auto): Reducing frees KV cache for more concurrency
+5. --kv-cache-dtype (default auto): Set fp8_e4m3 to halve KV cache memory
+6. --enforce-eager (default false): Set true to DISABLE CUDA graphs (debug only)
+7. --tensor-parallel-size (default 1): Multi-GPU parallelism
+8. --quantization (default auto-detected): Weight quantization method
+9. --scheduling-policy (default fcfs): Try priority for latency-sensitive workloads
 
 ANALYSIS GUIDELINES:
 - If TTFT is high: prefill is slow → try chunked-prefill or prefix-caching
