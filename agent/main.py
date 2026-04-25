@@ -128,6 +128,16 @@ Available Claude models: sonnet (default), opus, haiku
             "Requires --oc-mode."
         ),
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help=(
+            "Run the GPU profiling agent instead of the tuning agent. "
+            "Deploys profiled vLLM pods, collects PyTorch profiler traces, "
+            "and analyzes GPU kernels. Produces a profiling report."
+        ),
+    )
 
     # Vertex AI options
     parser.add_argument(
@@ -192,6 +202,7 @@ def main():
         print(f"Vertex Region:  {args.vertex_region}")
     print(f"Max Iterations: {args.max_iterations}")
     print(f"Profiles:       {', '.join(args.profiles)}")
+    print(f"Mode:           {'PROFILING' if args.profile else 'TUNING'}")
     print(f"Output Dir:     {args.output}")
 
     # Validate mode-specific args
@@ -280,21 +291,31 @@ def main():
         baseline_pod_name=args.oc_pod if args.oc_mode else None,
     )
 
-    agent = AgenticRunner(
-        llm_client=llm,
-        tools=tools,
-        max_iterations=args.max_iterations,
-        vllm_endpoint=args.vllm_endpoint,
-        model_name=args.model,
-        profiles=args.profiles,
-    )
+    if args.profile:
+        from .profiling_agent import ProfilingRunner
+        agent = ProfilingRunner(
+            llm_client=llm,
+            tools=tools,
+            max_iterations=args.max_iterations,
+            vllm_endpoint=args.vllm_endpoint,
+            model_name=args.model,
+        )
+    else:
+        agent = AgenticRunner(
+            llm_client=llm,
+            tools=tools,
+            max_iterations=args.max_iterations,
+            vllm_endpoint=args.vllm_endpoint,
+            model_name=args.model,
+            profiles=args.profiles,
+        )
 
     # Run the agent loop
-    print_step("Starting agent loop...")
+    mode_label = "profiling" if args.profile else "tuning"
+    print_step(f"Starting {mode_label} agent loop...")
     try:
         state = agent.run()
     finally:
-        # Ensure experiment pods are cleaned up even on exceptions
         if pod_manager:
             pod_manager.cleanup_all()
 

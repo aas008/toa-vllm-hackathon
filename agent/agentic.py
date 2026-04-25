@@ -58,14 +58,6 @@ TOOLS AVAILABLE:
 - analyze_trace(trace_json_path, top_n=20): Parse PyTorch profiler Chrome trace
 - map_kernel(kernel_name): Map CUDA kernel to source and category
 - create_vllm_pod(vllm_args): Create experiment pod, returns (pod_name, endpoint)
-- deploy_profiled_pod(vllm_args, profiler_ranges="100-150", profiler_activities="CPU,CUDA"):
-    Create experiment pod WITH PyTorch profiler injection. Webhook auto-injects
-    instrumentation on Worker.execute_model. After pod ready, send requests
-    then call collect_profile.
-- collect_profile(pod_name, num_requests=160, max_tokens=50):
-    Send inference requests to trigger profiling range, wait for completion,
-    extract key_averages table + Chrome trace. Returns: GPU utilization %,
-    top GPU kernels by time, category breakdown, top CPU ops.
 - delete_vllm_pod(pod_name): Delete experiment pod + port-forward cleanup
 - done(summary, success): Signal completion
 
@@ -235,19 +227,6 @@ REPORTING FORMAT:
   BEST CONFIGURATION: <the args and metrics of the best experiment>
   ALL EXPERIMENTS: <table of all experiments with args and key metrics>
   FINDINGS: <what you learned>
-
-GPU KERNEL PROFILING (use when you need to understand WHERE time is spent):
-1. deploy_profiled_pod(vllm_args=[], profiler_ranges="100-150")
-2. collect_profile(pod_name=<from step 1>, num_requests=160)
-   → Returns: GPU utilization %, top kernels (attention, GEMM, normalization),
-     category breakdown, CPU ops
-3. Use kernel breakdown to decide WHAT to tune:
-   - Attention kernels dominant → try chunked-prefill, prefix-caching
-   - GEMM/linear dominant → model is compute-bound, check quantization
-   - Communication (NCCL) dominant → tensor-parallel overhead, reduce TP
-   - Memory ops dominant → GPU memory bandwidth limit, check dtype
-   - High CPU ops → reduce Python overhead, enable CUDA graphs
-4. Delete profiled pod when done: delete_vllm_pod(pod_name)
 
 RULES:
 - NEVER modify, kill, or restart the baseline pod
