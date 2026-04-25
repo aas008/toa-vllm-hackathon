@@ -30,6 +30,11 @@ SYSTEM_PROMPT = """You are an autonomous vLLM performance tuning agent.
 GOAL: Benchmark, profile, analyze, and tune a vLLM inference server to maximize
 throughput while maintaining acceptable latency SLOs.
 
+ENVIRONMENT:
+- Use `uv` for all Python project and dependency management (install packages,
+  run scripts, manage virtualenvs). For example: `uv pip install guidellm`,
+  `uv run python script.py`. Do NOT use raw pip or conda for installing packages.
+
 TOOLS AVAILABLE:
 - run_command: Execute shell commands on the vLLM pod/host (runs REMOTELY on pod)
 - read_file: Read files from the vLLM pod/host (runs REMOTELY on pod)
