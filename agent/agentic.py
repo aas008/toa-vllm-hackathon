@@ -102,12 +102,22 @@ ANALYSIS GUIDELINES:
 - If OOM errors: reduce gpu-memory-utilization or max-num-seqs
 - If all requests error: check vLLM health, model loading, port-forwarding
 
+RESTARTING VLLM:
+If you need to restart vLLM with new parameters:
+1. First read the current launch command: cat /proc/1/cmdline | tr '\\0' ' '
+2. Kill the process: kill 1
+3. Start it again with your changes, using the SAME base command plus new args
+4. Wait for health: retry "curl -s http://localhost:8000/health" every 5s, up to 60s
+5. If it doesn't come back within 60s, call done and report the failure
+Do NOT spend more than 3 iterations trying to recover a stuck server.
+
 RULES:
-- ALWAYS read vLLM logs AND GuideLLM metrics after each benchmark
+- ALWAYS call fetch_vllm_logs AND read_benchmark_results after each benchmark
 - ONE parameter change at a time
-- If benchmark fails, diagnose from logs — do NOT just call done
-- Compare metrics before vs after each change
-- Only call done when you have actual results to report"""
+- Compare metrics before vs after each change using compare_benchmarks
+- Only call done when you have actual performance numbers to report
+- If you kill vLLM, you MUST restart it immediately with the correct command
+- Do NOT spend more than 3 iterations debugging a stuck/crashed server"""
 
 
 class AgenticRunner:
