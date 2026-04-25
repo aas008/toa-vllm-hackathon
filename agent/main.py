@@ -342,34 +342,49 @@ def main():
     # Build structured baseline/final results for the report.
     # AgentState stores raw benchmark output per profile; convert to dicts
     # that the reporter can use for before/after comparison.
+    #
+    # The raw output contains embedded JSON blocks from _extract_flat_metrics
+    # with keys like "output_tok/sec_mean", "ttft_p50", "itl_p50", etc.
+    # We parse those JSON blocks to get accurate numbers.
     def _parse_benchmark_output(results_dict: dict) -> list[dict]:
         """Extract structured metrics from stored benchmark output per profile."""
+        import re
         parsed = []
         for profile, raw_output in results_dict.items():
             entry = {"profile": profile}
             if isinstance(raw_output, str):
-                # Try to extract key metrics from the GuideLLM summary text
-                import re
-                for metric_key, pattern in [
-                    ("throughput_tok_per_sec", r"output_tok/sec_mean[=:]?\s*([\d.]+)"),
-                    ("ttft_p50", r"ttft_p50[=:]?\s*([\d.]+)"),
-                    ("ttft_p95", r"ttft_p95[=:]?\s*([\d.]+)"),
-                    ("ttft_p99", r"ttft_p99[=:]?\s*([\d.]+)"),
-                    ("itl_p50", r"itl_p50[=:]?\s*([\d.]+)"),
-                    ("itl_p95", r"itl_p95[=:]?\s*([\d.]+)"),
-                    ("itl_p99", r"itl_p99[=:]?\s*([\d.]+)"),
-                    ("tpot_p50", r"tpot_p50[=:]?\s*([\d.]+)"),
-                    ("tpot_p95", r"tpot_p95[=:]?\s*([\d.]+)"),
-                    ("tpot_p99", r"tpot_p99[=:]?\s*([\d.]+)"),
-                ]:
-                    m = re.search(pattern, raw_output)
-                    if m:
-                        entry[metric_key] = float(m.group(1))
-                # Fallback: look for the general "Output Tokens/sec" line
-                if "throughput_tok_per_sec" not in entry:
-                    m = re.search(r"Output Tokens/sec:.*?mean=([\d.]+)", raw_output)
-                    if m:
-                        entry["throughput_tok_per_sec"] = float(m.group(1))
+                # Find all JSON objects in the output (from flat metrics dumps)
+                # and merge them, preferring the highest-concurrency result
+                best_metrics = {}
+                for m in re.finditer(r'\{[^{}]+\}', raw_output):
+                    try:
+                        obj = json.loads(m.group())
+                        # Pick the highest-concurrency result for reporting
+                        if obj.get("concurrency", 0) >= best_metrics.get("concurrency", 0):
+                            best_metrics = obj
+                    except (json.JSONDecodeError, ValueError):
+                        continue
+
+                if best_metrics:
+                    # Map flat metric keys to report keys
+                    key_map = {
+                        "output_tok/sec_mean": "throughput_tok_per_sec",
+                        "output_tok/sec_median": "throughput_tok_per_sec",
+                        "ttft_p50": "ttft_p50",
+                        "ttft_p95": "ttft_p95",
+                        "ttft_p99": "ttft_p99",
+                        "itl_p50": "itl_p50",
+                        "itl_p95": "itl_p95",
+                        "itl_p99": "itl_p99",
+                        "tpot_p50": "tpot_p50",
+                        "tpot_p95": "tpot_p95",
+                        "tpot_p99": "tpot_p99",
+                    }
+                    for src, dst in key_map.items():
+                        v = best_metrics.get(src)
+                        if v is not None and dst not in entry:
+                            entry[dst] = float(v)
+
             parsed.append(entry)
         return parsed
 
