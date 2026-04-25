@@ -130,13 +130,26 @@ ANALYSIS GUIDELINES:
 - If OOM errors: reduce gpu-memory-utilization or max-num-seqs
 - If all requests error: check vLLM health, model loading, port-forwarding
 
+INCREMENTAL REPORTING:
+- After EVERY benchmark+read_benchmark_results cycle, call done with your findings SO FAR.
+  Include: baseline metrics, experiment metrics, comparison results, and next steps.
+- You can call done multiple times. Each call OVERWRITES the previous summary.
+  This ensures the report always reflects your latest progress.
+- Format your done summary as structured text with clear sections:
+  BASELINE: <metrics from baseline benchmark>
+  EXPERIMENT <name>: <metrics and comparison vs baseline>
+  FINDINGS: <what you learned>
+  NEXT STEPS: <what you'd try next if you had more iterations>
+- If you are on iteration 25+ out of 30, call done immediately with everything you have.
+  Do NOT start new experiments after iteration 25.
+
 RULES:
 - NEVER modify, kill, or restart the baseline pod
 - ALWAYS call fetch_vllm_logs AND read_benchmark_results after each benchmark
 - ONE parameter change at a time (one experiment pod per tuning attempt)
 - ALWAYS delete experiment pods after benchmarking (call delete_vllm_pod)
 - Compare metrics before vs after each change using compare_benchmarks
-- Only call done when you have actual performance numbers to report"""
+- Call done after EVERY completed benchmark cycle (partial results are fine)"""
 
 
 class AgenticRunner:
@@ -234,6 +247,19 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
                 })
                 print("   [Nudge injected: forcing benchmark]", flush=True)
 
+            # Budget warning: when approaching iteration cap, force report save
+            remaining = self.max_iterations - self.state.iteration
+            if remaining == 5:
+                self.messages.append({
+                    "role": "user",
+                    "content": (
+                        "WARNING: Only 5 iterations remaining. "
+                        "Call done NOW with all findings so far. "
+                        "Include baseline metrics, experiment results, and comparisons."
+                    ),
+                })
+                print("   [Budget warning: 5 iterations left]", flush=True)
+
             # Call LLM with tools
             response = self._call_llm_with_tools()
 
@@ -249,8 +275,8 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
                 })
 
         if not self.state.done:
-            print(">> Max iterations reached.", flush=True)
-            self.state.summary = "Max iterations reached without completion."
+            print(">> Max iterations reached. Extracting results from decision log...", flush=True)
+            self._extract_results_from_log()
 
         return self.state
 
@@ -374,6 +400,46 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
                 })
 
         self.messages.append({"role": "assistant", "content": content})
+
+    def _extract_results_from_log(self):
+        """Extract benchmark results from decision_log when agent hits max iterations."""
+        benchmark_outputs = []
+        comparison_outputs = []
+        last_agent_text = ""
+
+        for entry in self.decision_log:
+            if entry["tool"] == "run_benchmark" and entry.get("output", ""):
+                benchmark_outputs.append(entry)
+            elif entry["tool"] == "compare_benchmarks" and entry.get("output", ""):
+                comparison_outputs.append(entry)
+            elif entry["tool"] == "read_benchmark_results" and entry.get("output", ""):
+                benchmark_outputs.append(entry)
+
+        for msg in reversed(self.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            last_agent_text = block["text"]
+                            break
+                if last_agent_text:
+                    break
+
+        summary_parts = [f"Max iterations reached ({self.state.iteration}/{self.max_iterations})."]
+        summary_parts.append(f"Benchmarks run: {len(benchmark_outputs)}")
+        summary_parts.append(f"Comparisons run: {len(comparison_outputs)}")
+
+        if comparison_outputs:
+            last_comparison = comparison_outputs[-1]
+            summary_parts.append(f"\nLatest comparison (iteration {last_comparison['iteration']}):")
+            summary_parts.append(last_comparison["output"][:2000])
+
+        if last_agent_text:
+            summary_parts.append(f"\nAgent's last analysis:\n{last_agent_text[:1000]}")
+
+        self.state.summary = "\n".join(summary_parts)
+        self.state.success = len(benchmark_outputs) > 0
 
     def get_decision_log(self) -> list:
         """Get the decision log."""
