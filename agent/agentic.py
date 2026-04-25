@@ -363,9 +363,15 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
                     "timestamp": datetime.utcnow().isoformat(),
                 })
             elif name == "run_benchmark":
-                # Store benchmark results
+                # Store benchmark results — first successful benchmark per
+                # profile is baseline; subsequent ones update current_results
                 profile = inputs.get("profile", "unknown")
-                self.state.current_results[profile] = output
+                is_experiment = bool(inputs.get("endpoint") and
+                                     inputs.get("endpoint") != self.vllm_endpoint)
+                if not is_experiment and profile not in self.state.baseline_results:
+                    self.state.baseline_results[profile] = output
+                else:
+                    self.state.current_results[profile] = output
             elif name == "analyze_trace":
                 try:
                     self.state.kernel_analysis = json.loads(output)
