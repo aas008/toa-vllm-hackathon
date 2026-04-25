@@ -12,32 +12,77 @@ A CLI-based agentic loop that automatically benchmarks, profiles, analyzes, and 
 - Claude API access (direct Anthropic API key or Google Cloud Vertex AI)
 - A running vLLM pod/server with GPU
 
-## Setup
+## Setup (Step-by-Step for Team Members)
+
+### Step 1: Clone and install dependencies
 
 ```bash
-# 1. Clone and install dependencies
 git clone https://github.com/aas008/toa-vllm-hackathon.git
 cd toa-vllm-hackathon
 pip install -r requirements.txt
-
-# 2. Set up cluster access (OpenShift mode)
-export KUBECONFIG=/path/to/your/kubeconfig
-oc login  # or verify: oc whoami
-
-# 3. Deploy vLLM pod (if not already running)
-oc apply -f k8s/model-pvc.yaml
-oc apply -f k8s/model-download-job.yaml   # wait for completion
-oc apply -f aanya-pod.yaml
-
-# 4. Wait for pod to be ready
-oc get pods -n toa-hack -w
-
-# 5. Set up port-forward to the vLLM pod
-oc port-forward -n toa-hack aanya-vllm-test-pod 8000:8000 &
-
-# 6. Verify endpoint
-curl http://localhost:8000/v1/models
 ```
+
+### Step 2: Authenticate to OpenShift and Google Cloud
+
+```bash
+# OpenShift — log in and verify you can see the vLLM pod
+export KUBECONFIG=/path/to/your/kubeconfig
+oc login  # or: oc whoami to verify
+oc get pods -n <namespace>
+
+# Google Cloud — authenticate for Vertex AI (Claude API access)
+gcloud auth application-default login
+```
+
+### Step 3: Find the vLLM pod and set up port-forward
+
+The benchmark tool (GuideLLM) runs locally and sends HTTP requests to vLLM.
+You need a port-forward so `localhost:8000` reaches the pod:
+
+```bash
+# Find available vLLM pods
+oc get pods -A | grep vllm
+
+# Check what port vLLM is listening on inside the pod
+oc exec -n <namespace> <pod-name> -- ss -tlnp | grep python
+
+# Set up port-forward (local 8000 -> pod's serving port)
+oc port-forward -n <namespace> <pod-name> 8000:<pod-port> &
+```
+
+### Step 4: Identify the served model name
+
+```bash
+curl -s http://localhost:8000/v1/models | python3 -m json.tool
+# Use the "id" field from the response as the --model argument
+```
+
+### Step 5: Set Vertex AI environment variables
+
+```bash
+export CLAUDE_CODE_USE_VERTEX=1
+export ANTHROPIC_VERTEX_PROJECT_ID=itpc-gcp-pnd-pe-eng-claude
+export CLOUD_ML_REGION=us-east5
+```
+
+### Step 6: Run the agent
+
+```bash
+python3 -m agent \
+    --vllm-endpoint http://localhost:8000 \
+    --model <model-name-from-step-4> \
+    --oc-mode \
+    --oc-pod <pod-name> \
+    --oc-namespace <namespace> \
+    --vertex \
+    --vertex-project-id itpc-gcp-pnd-pe-eng-claude \
+    --vertex-region us-east5 \
+    --max-iterations 15 \
+    --profiles balanced \
+    --output reports/
+```
+
+Reports are saved to `reports/report_<timestamp>.md` and `reports/report_<timestamp>.json`.
 
 ## Running the Agent
 

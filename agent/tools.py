@@ -243,32 +243,32 @@ class OcExecutor(RemoteExecutor):
 
 BENCHMARK_PROFILES = {
     "balanced": {
-        "isl": 1000,
-        "osl": 1000,
-        "description": "Balanced workload (ISL=1000, OSL=1000)",
-        "data_flag": '{"prompt_tokens": 1000, "output_tokens": 1000, "samples": 1000}',
+        "isl": 128,
+        "osl": 128,
+        "description": "Balanced workload (ISL=128, OSL=128)",
+        "data_flag": '{"prompt_tokens": 128, "output_tokens": 128, "samples": 100}',
     },
     "decode_heavy": {
-        "isl": 512,
-        "osl": 2048,
-        "description": "Decode-heavy workload (ISL=512, OSL=2048)",
-        "data_flag": '{"prompt_tokens": 512, "output_tokens": 2048, "samples": 1000}',
+        "isl": 128,
+        "osl": 512,
+        "description": "Decode-heavy workload (ISL=128, OSL=512)",
+        "data_flag": '{"prompt_tokens": 128, "output_tokens": 512, "samples": 100}',
     },
     "prefill_heavy": {
-        "isl": 2048,
-        "osl": 128,
-        "description": "Prefill-heavy workload (ISL=2048, OSL=128)",
-        "data_flag": '{"prompt_tokens": 2048, "output_tokens": 128, "samples": 1000}',
+        "isl": 512,
+        "osl": 64,
+        "description": "Prefill-heavy workload (ISL=512, OSL=64)",
+        "data_flag": '{"prompt_tokens": 512, "output_tokens": 64, "samples": 100}',
     },
     "long_context": {
-        "isl": 8000,
-        "osl": 1000,
-        "description": "Long-context workload (ISL=8000, OSL=1000)",
-        "data_flag": '{"prompt_tokens": 8000, "output_tokens": 1000, "samples": 1000}',
+        "isl": 1024,
+        "osl": 128,
+        "description": "Long-context workload (ISL=1024, OSL=128)",
+        "data_flag": '{"prompt_tokens": 1024, "output_tokens": 128, "samples": 100}',
     },
 }
 
-DEFAULT_CONCURRENCY_LEVELS = [1, 50, 100, 200, 300, 500, 650]
+DEFAULT_CONCURRENCY_LEVELS = [1, 50]
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +369,7 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "description": (
                         "Comma-separated concurrency levels for the sweep "
-                        "(e.g. '1,50,100,200'). Default: '1,50,100,200,300,500,650'"
+                        "(e.g. '1,50'). Default: '1,50'"
                     ),
                 },
                 "endpoint": {
@@ -384,8 +384,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "max_seconds": {
                     "type": "integer",
-                    "description": "Maximum seconds per concurrency level. Default: 120",
-                    "default": 120,
+                    "description": "Maximum seconds per concurrency level. Default: 30",
+                    "default": 30,
                 },
                 "output_path": {
                     "type": "string",
@@ -568,7 +568,7 @@ def _handle_run_benchmark(
     profile_name = args["profile"]
     endpoint = args["endpoint"]
     model = args["model"]
-    max_seconds = args.get("max_seconds", 120)
+    max_seconds = args.get("max_seconds", 30)
     concurrency = args.get("concurrency", ",".join(str(c) for c in DEFAULT_CONCURRENCY_LEVELS))
 
     if profile_name not in BENCHMARK_PROFILES:
