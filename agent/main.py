@@ -433,6 +433,63 @@ def main():
     baseline_results = _parse_benchmark_output(state.baseline_results)
     final_results = _parse_benchmark_output(state.current_results)
 
+    # Fallback: if baseline or final results are missing metrics, try to
+    # extract them from the decision log.  The decision log records the
+    # output of every tool call (truncated to 4000 chars) and is always
+    # available.  This handles cases where state.baseline_results was not
+    # populated correctly despite the benchmark succeeding.
+    decision_log = agent.get_decision_log()
+
+    def _has_metrics(entry: dict) -> bool:
+        return "throughput_tok_per_sec" in entry
+
+    def _extract_from_decision_log(
+        decision_log: list,
+        vllm_endpoint: str,
+        is_baseline: bool,
+    ) -> list[dict]:
+        """Parse benchmark outputs from the decision log.
+
+        For baseline: pick run_benchmark calls whose endpoint matches the
+        CLI endpoint (or has no explicit endpoint).
+        For final/experiment: pick run_benchmark calls with a different
+        endpoint.
+        """
+        profile_outputs: dict[str, str] = {}
+        for entry in decision_log:
+            if entry.get("tool") != "run_benchmark":
+                continue
+            output = entry.get("output", "")
+            if not output or output.startswith("Error:"):
+                continue
+            if "Tokens/sec" not in output:
+                continue
+            inputs = entry.get("inputs", {})
+            ep = inputs.get("endpoint", vllm_endpoint)
+            entry_is_baseline = (ep == vllm_endpoint)
+            if entry_is_baseline != is_baseline:
+                continue
+            profile = inputs.get("profile", "unknown")
+            # Keep the LAST successful benchmark for each profile
+            profile_outputs[profile] = output
+        return _parse_benchmark_output(profile_outputs)
+
+    # Fill in missing baseline metrics from decision log
+    if all(not _has_metrics(e) for e in baseline_results) and decision_log:
+        fallback = _extract_from_decision_log(
+            decision_log, args.vllm_endpoint, is_baseline=True
+        )
+        if fallback and any(_has_metrics(e) for e in fallback):
+            baseline_results = fallback
+
+    # Fill in missing final metrics from decision log
+    if all(not _has_metrics(e) for e in final_results) and decision_log:
+        fallback = _extract_from_decision_log(
+            decision_log, args.vllm_endpoint, is_baseline=False
+        )
+        if fallback and any(_has_metrics(e) for e in fallback):
+            final_results = fallback
+
     report = TuningReport(
         timestamp=datetime.utcnow().strftime("%Y%m%d_%H%M%S"),
         model_name=args.model,
