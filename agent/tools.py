@@ -2382,6 +2382,7 @@ class AgentTools:
         namespace: Optional[str] = None,
         kubeconfig: Optional[str] = None,
         baseline_pod_name: Optional[str] = None,
+        knowledge_base=None,
     ):
         self.executor = executor
         self.vllm_endpoint = vllm_endpoint
@@ -2390,12 +2391,44 @@ class AgentTools:
         self.namespace = namespace
         self.kubeconfig = kubeconfig
         self.baseline_pod_name = baseline_pod_name
+        self.knowledge_base = knowledge_base
         self.command_history: list[dict] = []
         self.metrics_snapshots: dict = {}
 
     def get_tool_definitions(self) -> list[dict]:
-        """Return the tool definitions list for Claude's API."""
-        return TOOL_DEFINITIONS
+        """Return tool definitions, including knowledge base if configured."""
+        defs = list(TOOL_DEFINITIONS)
+        if self.knowledge_base is not None:
+            defs.insert(-1, {
+                "name": "query_knowledge_base",
+                "description": (
+                    "Search the vLLM knowledge base for information about concepts, "
+                    "techniques, architectures, and optimization strategies. "
+                    "Use this to look up: how a vLLM feature works, what tuning parameters "
+                    "to try, tradeoffs between approaches, kernel-level details, "
+                    "quantization methods, speculative decoding, etc. "
+                    "Returns relevant wiki pages with detailed explanations."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": (
+                                "Topic to search for (e.g. 'chunked prefill', 'FP8 quantization', "
+                                "'speculative decoding', 'KV cache', 'attention backends')"
+                            ),
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "Max number of pages to return. Default: 3.",
+                            "default": 3,
+                        },
+                    },
+                    "required": ["topic"],
+                },
+            })
+        return defs
 
     def dispatch(self, name: str, args: dict) -> ToolResult:
         """Dispatch a tool call, tracking history on this instance.
@@ -2411,6 +2444,14 @@ class AgentTools:
         elif name == "check_preemptions":
             if "endpoint" not in args or not args.get("endpoint"):
                 args["endpoint"] = self.vllm_endpoint  # baseline default
+        elif name == "query_knowledge_base" and self.knowledge_base is not None:
+            topic = args.get("topic", "")
+            max_results = args.get("max_results", 3)
+            try:
+                output = self.knowledge_base.query(topic, max_results=max_results)
+                return ToolResult(tool="query_knowledge_base", success=True, output=output)
+            except Exception as e:
+                return ToolResult(tool="query_knowledge_base", success=False, output="", error=str(e))
         return dispatch_tool(
             name, args, self.executor, self.command_history,
             pod_manager=self.pod_manager,

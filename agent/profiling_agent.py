@@ -50,6 +50,10 @@ TOOLS AVAILABLE:
 - fetch_vllm_logs(log_source="process", tail_lines=200, pod_name=None):
     Fetch + parse vLLM logs with 120+ regex patterns.
 - delete_vllm_pod(pod_name): Delete experiment pod + cleanup.
+- query_knowledge_base(topic, max_results=3): Search vLLM knowledge base for
+    kernel details, optimization techniques, architecture internals. Use to
+    understand what kernels do and how to optimize them. Available only if
+    --knowledge-base is configured.
 - done(summary, success): Signal completion with findings.
 
 PROFILING WORKFLOW:

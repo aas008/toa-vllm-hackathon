@@ -129,6 +129,15 @@ Available Claude models: sonnet (default), opus, haiku
         ),
     )
     parser.add_argument(
+        "--knowledge-base",
+        default=None,
+        help=(
+            "Path to an Obsidian-style wiki directory with vLLM knowledge. "
+            "Enables the query_knowledge_base tool for looking up concepts, "
+            "techniques, architectures, and optimization guidance."
+        ),
+    )
+    parser.add_argument(
         "--profile",
         action="store_true",
         default=False,
@@ -280,6 +289,16 @@ def main():
         atexit.register(pod_manager.cleanup_all)
         print(f"  PodManager ready (namespace={args.oc_namespace})")
 
+    # Load knowledge base if configured
+    knowledge_base = None
+    if args.knowledge_base:
+        from .knowledge_base import KnowledgeBase
+        try:
+            knowledge_base = KnowledgeBase(args.knowledge_base)
+            print_step(f"Knowledge base loaded: {args.knowledge_base} ({len(knowledge_base._index)} pages)")
+        except Exception as e:
+            print(f"Warning: Could not load knowledge base: {e}")
+
     # Create tools and agent
     tools = AgentTools(
         executor=executor,
@@ -289,6 +308,7 @@ def main():
         namespace=args.oc_namespace if args.oc_mode else None,
         kubeconfig=args.kubeconfig,
         baseline_pod_name=args.oc_pod if args.oc_mode else None,
+        knowledge_base=knowledge_base,
     )
 
     if args.profile:

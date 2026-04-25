@@ -59,6 +59,10 @@ TOOLS AVAILABLE:
 - map_kernel(kernel_name): Map CUDA kernel to source and category
 - create_vllm_pod(vllm_args): Create experiment pod, returns (pod_name, endpoint)
 - delete_vllm_pod(pod_name): Delete experiment pod + port-forward cleanup
+- query_knowledge_base(topic, max_results=3): Search vLLM knowledge base for
+    concepts, techniques, architectures, optimization strategies. Use BEFORE
+    making tuning decisions to understand tradeoffs. Available only if
+    --knowledge-base is configured.
 - done(summary, success): Signal completion
 
 ARCHITECTURE:
