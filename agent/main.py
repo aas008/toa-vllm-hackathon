@@ -4,6 +4,7 @@ vLLM Performance Tuning Agent - CLI Entry Point
 """
 import argparse
 import atexit
+import json
 import os
 import sys
 
@@ -347,43 +348,84 @@ def main():
     # with keys like "output_tok/sec_mean", "ttft_p50", "itl_p50", etc.
     # We parse those JSON blocks to get accurate numbers.
     def _parse_benchmark_output(results_dict: dict) -> list[dict]:
-        """Extract structured metrics from stored benchmark output per profile."""
+        """Extract structured metrics from stored benchmark output per profile.
+
+        The output comes from run_benchmark which uses _extract_guidellm_metrics.
+        It contains human-readable lines like:
+          Output Tokens/sec: mean=627.16, median=784.57, p50=784.57, p95=868.80
+          TTFT (ms): mean=42.36, median=31.53, p50=31.53, p95=116.69, p99=120.46
+
+        We also check for embedded JSON blocks (from read_benchmark_results
+        flat metrics output) as a fallback.
+        """
         import re
         parsed = []
         for profile, raw_output in results_dict.items():
             entry = {"profile": profile}
             if isinstance(raw_output, str):
-                # Find all JSON objects in the output (from flat metrics dumps)
-                # and merge them, preferring the highest-concurrency result
-                best_metrics = {}
-                for m in re.finditer(r'\{[^{}]+\}', raw_output):
-                    try:
-                        obj = json.loads(m.group())
-                        # Pick the highest-concurrency result for reporting
-                        if obj.get("concurrency", 0) >= best_metrics.get("concurrency", 0):
-                            best_metrics = obj
-                    except (json.JSONDecodeError, ValueError):
-                        continue
+                # Strategy 1: Parse human-readable metric lines from
+                # _extract_guidellm_metrics output.  We want the LAST
+                # concurrency block (highest concurrency) for reporting.
+                metric_patterns = {
+                    "Output Tokens/sec": "throughput_tok_per_sec",
+                    "TTFT (ms)": None,  # handled specially
+                    "ITL (ms)": None,
+                    "TPOT (ms)": None,
+                }
 
-                if best_metrics:
-                    # Map flat metric keys to report keys
-                    key_map = {
-                        "output_tok/sec_mean": "throughput_tok_per_sec",
-                        "output_tok/sec_median": "throughput_tok_per_sec",
-                        "ttft_p50": "ttft_p50",
-                        "ttft_p95": "ttft_p95",
-                        "ttft_p99": "ttft_p99",
-                        "itl_p50": "itl_p50",
-                        "itl_p95": "itl_p95",
-                        "itl_p99": "itl_p99",
-                        "tpot_p50": "tpot_p50",
-                        "tpot_p95": "tpot_p95",
-                        "tpot_p99": "tpot_p99",
-                    }
-                    for src, dst in key_map.items():
-                        v = best_metrics.get(src)
-                        if v is not None and dst not in entry:
-                            entry[dst] = float(v)
+                # Split by concurrency blocks and use the last one
+                blocks = re.split(r'--- Concurrency: \d+', raw_output)
+                text_block = blocks[-1] if len(blocks) > 1 else raw_output
+
+                # Extract key=value pairs from metric lines
+                def _extract_kv(line):
+                    """Parse 'mean=1.23, median=4.56, p50=7.89' into dict."""
+                    return dict(re.findall(r'(\w+)=([\d.]+)', line))
+
+                for line in text_block.split('\n'):
+                    line_stripped = line.strip()
+                    if line_stripped.startswith("Output Tokens/sec:"):
+                        kv = _extract_kv(line_stripped)
+                        if "mean" in kv and "throughput_tok_per_sec" not in entry:
+                            entry["throughput_tok_per_sec"] = float(kv["mean"])
+                    elif line_stripped.startswith("TTFT (ms):"):
+                        kv = _extract_kv(line_stripped)
+                        for p in ("p50", "p95", "p99"):
+                            if p in kv and f"ttft_{p}" not in entry:
+                                entry[f"ttft_{p}"] = float(kv[p])
+                    elif line_stripped.startswith("ITL (ms):"):
+                        kv = _extract_kv(line_stripped)
+                        for p in ("p50", "p95", "p99"):
+                            if p in kv and f"itl_{p}" not in entry:
+                                entry[f"itl_{p}"] = float(kv[p])
+                    elif line_stripped.startswith("TPOT (ms):"):
+                        kv = _extract_kv(line_stripped)
+                        for p in ("p50", "p95", "p99"):
+                            if p in kv and f"tpot_{p}" not in entry:
+                                entry[f"tpot_{p}"] = float(kv[p])
+
+                # Strategy 2: Fallback — look for embedded JSON blocks
+                # (from read_benchmark_results flat metrics output)
+                if "throughput_tok_per_sec" not in entry:
+                    best_metrics = {}
+                    for m in re.finditer(r'\{[^{}]+\}', raw_output):
+                        try:
+                            obj = json.loads(m.group())
+                            if obj.get("concurrency", 0) >= best_metrics.get("concurrency", 0):
+                                best_metrics = obj
+                        except (json.JSONDecodeError, ValueError):
+                            continue
+                    if best_metrics:
+                        key_map = {
+                            "output_tok/sec_mean": "throughput_tok_per_sec",
+                            "ttft_p50": "ttft_p50", "ttft_p95": "ttft_p95", "ttft_p99": "ttft_p99",
+                            "itl_p50": "itl_p50", "itl_p95": "itl_p95", "itl_p99": "itl_p99",
+                            "tpot_p50": "tpot_p50", "tpot_p95": "tpot_p95", "tpot_p99": "tpot_p99",
+                        }
+                        for src, dst in key_map.items():
+                            v = best_metrics.get(src)
+                            if v is not None and dst not in entry:
+                                entry[dst] = float(v)
 
             parsed.append(entry)
         return parsed
