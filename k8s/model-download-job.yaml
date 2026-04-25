@@ -1,0 +1,53 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: model-download
+  namespace: toa-hack
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    metadata:
+      labels:
+        app: model-download
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: download
+          image: python:3.11-slim
+          command:
+            - bash
+            - -c
+            - |
+              set -euo pipefail
+              export HOME=/tmp
+              export PYTHONUSERBASE=/tmp/pyuser
+              echo "Installing huggingface_hub..."
+              pip install --no-cache-dir --user huggingface_hub
+              export PATH="/tmp/pyuser/bin:$PATH"
+              export PYTHONPATH="/tmp/pyuser/lib/python3.11/site-packages:${PYTHONPATH:-}"
+              echo "Downloading facebook/opt-125m to /models/facebook/opt-125m ..."
+              python -c "
+              from huggingface_hub import snapshot_download
+              snapshot_download(
+                  repo_id='facebook/opt-125m',
+                  local_dir='/models/facebook/opt-125m',
+              )
+              print('Download complete.')
+              "
+              echo "Listing downloaded files:"
+              ls -lhR /models/facebook/opt-125m
+          volumeMounts:
+            - name: model-storage
+              mountPath: /models
+          resources:
+            requests:
+              cpu: "1"
+              memory: 2Gi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+      volumes:
+        - name: model-storage
+          persistentVolumeClaim:
+            claimName: vllm-model-pvc

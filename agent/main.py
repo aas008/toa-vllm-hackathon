@@ -91,6 +91,24 @@ Available Claude models: sonnet (default), opus, haiku
         help="Verbose output"
     )
 
+    # Vertex AI options
+    parser.add_argument(
+        "--vertex",
+        action="store_true",
+        default=os.environ.get("CLAUDE_CODE_USE_VERTEX", "0") == "1",
+        help="Use Google Cloud Vertex AI for Claude API access (default: true if CLAUDE_CODE_USE_VERTEX=1)"
+    )
+    parser.add_argument(
+        "--vertex-project-id",
+        default=os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID"),
+        help="Vertex AI project ID (default: $ANTHROPIC_VERTEX_PROJECT_ID)"
+    )
+    parser.add_argument(
+        "--vertex-region",
+        default=os.environ.get("CLOUD_ML_REGION", "us-east5"),
+        help="Vertex AI region (default: $CLOUD_ML_REGION or us-east5)"
+    )
+
     return parser
 
 
@@ -111,10 +129,18 @@ def main():
     parser = create_parser()
     args = parser.parse_args()
 
-    # Validate API key
-    if not args.api_key:
+    # Validate API key (only required when NOT using Vertex AI)
+    if not args.vertex and not args.api_key:
         print("Error: ANTHROPIC_API_KEY not set. Use --api-key or set the environment variable.")
+        print("       Alternatively, use --vertex for Google Cloud Vertex AI access.")
         sys.exit(1)
+
+    if args.vertex and not args.vertex_project_id:
+        print("Error: Vertex AI project ID not set. Use --vertex-project-id or set ANTHROPIC_VERTEX_PROJECT_ID.")
+        sys.exit(1)
+
+    # Determine backend label
+    backend = "Vertex AI" if args.vertex else "Direct API"
 
     # Print banner
     print_header("vLLM Performance Tuning Agent v1.0")
@@ -122,6 +148,10 @@ def main():
     print(f"vLLM Host:      {args.vllm_host}")
     print(f"Served Model:   {args.model}")
     print(f"Claude Model:   {get_model_id(args.claude_model)}")
+    print(f"Claude Backend: {backend}")
+    if args.vertex:
+        print(f"Vertex Project: {args.vertex_project_id}")
+        print(f"Vertex Region:  {args.vertex_region}")
     print(f"Max Iterations: {args.max_iterations}")
     print(f"Profiles:       {', '.join(args.profiles)}")
     print(f"Output Dir:     {args.output}")
@@ -135,10 +165,13 @@ def main():
     print(f"  SSH to {args.vllm_host}: OK")
 
     # Test Claude API connectivity
-    print_step("Testing Claude API connectivity...")
+    print_step(f"Testing Claude API connectivity ({backend})...")
     llm = ClaudeClient(
         api_key=args.api_key,
         model=get_model_id(args.claude_model),
+        use_vertex=args.vertex,
+        vertex_project_id=args.vertex_project_id,
+        vertex_region=args.vertex_region,
     )
     try:
         test_response = llm.analyze(

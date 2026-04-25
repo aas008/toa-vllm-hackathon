@@ -1,11 +1,13 @@
 """
-LLM wrapper with token tracking for Claude API (direct Anthropic only).
+LLM wrapper with token tracking for Claude API (direct Anthropic and Vertex AI).
 """
 import os
+import re
 from dataclasses import dataclass
 from typing import Optional
 
 import anthropic
+from anthropic import AnthropicVertex
 
 
 # Pricing per 1M tokens (USD)
@@ -14,6 +16,24 @@ MODEL_PRICING = {
     "claude-opus-4-20250514": {"input": 15.0, "output": 75.0},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
 }
+
+
+def to_vertex_model_id(model_id: str) -> str:
+    """Convert a standard Anthropic model ID to Vertex AI format.
+
+    Vertex AI uses '@' instead of the last '-' before the date stamp.
+    e.g. "claude-sonnet-4-20250514" -> "claude-sonnet-4@20250514"
+         "claude-opus-4-20250514"   -> "claude-opus-4@20250514"
+         "claude-haiku-4-5-20251001" -> "claude-haiku-4-5@20251001"
+    If the model already contains '@', return as-is.
+    """
+    if "@" in model_id:
+        return model_id
+    # Match the last '-' followed by a pure-digit date suffix
+    match = re.match(r"^(.+)-(\d{8,})$", model_id)
+    if match:
+        return f"{match.group(1)}@{match.group(2)}"
+    return model_id
 
 
 @dataclass
@@ -83,7 +103,7 @@ def get_model_id(model_name: str) -> str:
 
 
 class ClaudeClient:
-    """Claude API client with token tracking (direct Anthropic API)."""
+    """Claude API client with token tracking (direct Anthropic API or Vertex AI)."""
 
     DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
@@ -91,10 +111,30 @@ class ClaudeClient:
         self,
         api_key: Optional[str] = None,
         model: Optional[str] = None,
+        use_vertex: bool = False,
+        vertex_project_id: Optional[str] = None,
+        vertex_region: str = "us-east5",
     ):
+        self.use_vertex = use_vertex
         self.model = model or self.DEFAULT_MODEL
         self.usage: dict[str, TokenUsage] = {}
-        self.client = anthropic.Anthropic(api_key=api_key)
+
+        if self.use_vertex:
+            project_id = vertex_project_id or os.environ.get("ANTHROPIC_VERTEX_PROJECT_ID")
+            if not project_id:
+                raise ValueError(
+                    "Vertex AI requires a project ID. "
+                    "Set --vertex-project-id or ANTHROPIC_VERTEX_PROJECT_ID."
+                )
+            region = vertex_region or os.environ.get("CLOUD_ML_REGION", "us-east5")
+            self.client = AnthropicVertex(
+                project_id=project_id,
+                region=region,
+            )
+            # Convert model ID to Vertex format (uses '@' separator)
+            self.model = to_vertex_model_id(self.model)
+        else:
+            self.client = anthropic.Anthropic(api_key=api_key)
 
     def _get_usage(self, model: str) -> TokenUsage:
         if model not in self.usage:
