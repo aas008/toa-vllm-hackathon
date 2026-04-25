@@ -49,6 +49,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .ssh_client import SSHClient, SSHResult
+from .pod_manager import PodManager
 
 
 # ---------------------------------------------------------------------------
@@ -282,7 +283,8 @@ TOOL_DEFINITIONS: list[dict] = [
             "Run a shell command on the vLLM host/pod to diagnose or fix issues. "
             "Use this to explore the system, check GPU status, inspect vLLM configs, "
             "restart services, apply tunings, etc. The command runs on the remote "
-            "target (SSH host or OpenShift pod) via the configured executor."
+            "target (SSH host or OpenShift pod) via the configured executor. "
+            "Optionally specify pod_name to run on an experiment pod instead of the baseline."
         ),
         "input_schema": {
             "type": "object",
@@ -298,6 +300,13 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Increase for long-running operations (e.g. model reload)."
                     ),
                     "default": 60,
+                },
+                "pod_name": {
+                    "type": "string",
+                    "description": (
+                        "Optional: name of an experiment pod to run the command on "
+                        "(created by create_vllm_pod). If omitted, runs on the baseline pod."
+                    ),
                 },
             },
             "required": ["command"],
@@ -457,7 +466,8 @@ TOOL_DEFINITIONS: list[dict] = [
             "compilation (attention backend, torch.compile time, CUDA graph capture), "
             "memory (model memory, KV cache size, weights load time), "
             "timing (engine init time), and warnings/errors. "
-            "IMPORTANT: Call this AFTER every benchmark to understand the server state."
+            "IMPORTANT: Call this AFTER every benchmark to understand the server state. "
+            "Optionally specify pod_name to fetch logs from an experiment pod."
         ),
         "input_schema": {
             "type": "object",
@@ -484,6 +494,13 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "integer",
                     "description": "Number of recent log lines to fetch. Default: 200",
                     "default": 200,
+                },
+                "pod_name": {
+                    "type": "string",
+                    "description": (
+                        "Optional: name of an experiment pod to fetch logs from "
+                        "(created by create_vllm_pod). If omitted, uses the baseline pod."
+                    ),
                 },
             },
             "required": [],
@@ -542,6 +559,47 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
             },
             "required": ["baseline_path", "current_path"],
+        },
+    },
+    {
+        "name": "create_vllm_pod",
+        "description": (
+            "Create a new experiment pod from the pod template with extra vLLM CLI args. "
+            "The pod is created in the configured namespace, waits for readiness, and "
+            "a port-forward is set up automatically. Returns the pod name and endpoint URL "
+            "that can be passed to run_benchmark. Use this to test tuning parameters without "
+            "modifying the baseline pod."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "vllm_args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Extra vLLM CLI args to add to the pod's launch command. "
+                        "e.g. [\"--enable-chunked-prefill\", \"--gpu-memory-utilization\", \"0.95\"]"
+                    ),
+                },
+            },
+            "required": ["vllm_args"],
+        },
+    },
+    {
+        "name": "delete_vllm_pod",
+        "description": (
+            "Delete an experiment pod created by create_vllm_pod and clean up its "
+            "port-forward. Call this after benchmarking an experiment pod to free resources."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pod_name": {
+                    "type": "string",
+                    "description": "Name of the experiment pod to delete (returned by create_vllm_pod).",
+                },
+            },
+            "required": ["pod_name"],
         },
     },
     {
@@ -1418,6 +1476,100 @@ def _handle_compare_benchmarks(
     )
 
 
+def _handle_create_vllm_pod(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+    *,
+    pod_manager: Optional[PodManager] = None,
+) -> ToolResult:
+    """Create a new experiment pod with extra vLLM CLI args."""
+    vllm_args = args["vllm_args"]
+
+    command_history.append({
+        "tool": "create_vllm_pod",
+        "vllm_args": vllm_args,
+    })
+
+    if pod_manager is None:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="create_vllm_pod",
+            success=False,
+            output="",
+            error="PodManager not configured. Use --pod-template and --oc-mode to enable pod management.",
+        )
+
+    try:
+        pod_name, endpoint = pod_manager.create_pod(vllm_args)
+        command_history[-1]["success"] = True
+        command_history[-1]["pod_name"] = pod_name
+        command_history[-1]["endpoint"] = endpoint
+        return ToolResult(
+            tool="create_vllm_pod",
+            success=True,
+            output=(
+                f"Experiment pod created successfully.\n"
+                f"  Pod name: {pod_name}\n"
+                f"  Endpoint: {endpoint}\n"
+                f"  vLLM args: {' '.join(vllm_args)}\n\n"
+                f"Use this endpoint when calling run_benchmark (pass endpoint=\"{endpoint}\").\n"
+                f"Use pod_name=\"{pod_name}\" with run_command or fetch_vllm_logs to inspect the pod.\n"
+                f"Call delete_vllm_pod(pod_name=\"{pod_name}\") when done."
+            ),
+        )
+    except Exception as e:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="create_vllm_pod",
+            success=False,
+            output="",
+            error=f"Failed to create experiment pod: {e}",
+        )
+
+
+def _handle_delete_vllm_pod(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+    *,
+    pod_manager: Optional[PodManager] = None,
+) -> ToolResult:
+    """Delete an experiment pod and clean up its port-forward."""
+    pod_name = args["pod_name"]
+
+    command_history.append({
+        "tool": "delete_vllm_pod",
+        "pod_name": pod_name,
+    })
+
+    if pod_manager is None:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="delete_vllm_pod",
+            success=False,
+            output="",
+            error="PodManager not configured.",
+        )
+
+    try:
+        pod_manager.delete_pod(pod_name)
+        command_history[-1]["success"] = True
+        return ToolResult(
+            tool="delete_vllm_pod",
+            success=True,
+            output=f"Pod {pod_name} deleted and port-forward cleaned up.",
+        )
+    except Exception as e:
+        command_history[-1]["success"] = False
+        return ToolResult(
+            tool="delete_vllm_pod",
+            success=False,
+            output="",
+            error=f"Failed to delete pod {pod_name}: {e}",
+        )
+
+
 def _handle_done(
     args: dict,
     _executor: RemoteExecutor,
@@ -1454,8 +1606,16 @@ _TOOL_HANDLERS = {
     "compare_benchmarks": _handle_compare_benchmarks,
     "analyze_trace": _handle_analyze_trace,
     "map_kernel": _handle_map_kernel,
+    "create_vllm_pod": _handle_create_vllm_pod,
+    "delete_vllm_pod": _handle_delete_vllm_pod,
     "done": _handle_done,
 }
+
+# Handlers that accept pod_manager as a keyword argument
+_POD_MANAGER_HANDLERS = {"create_vllm_pod", "delete_vllm_pod"}
+
+# Handlers that accept an executor override via pod_name arg
+_POD_AWARE_HANDLERS = {"run_command", "fetch_vllm_logs"}
 
 
 def dispatch_tool(
@@ -1463,6 +1623,10 @@ def dispatch_tool(
     args: dict,
     executor: RemoteExecutor,
     command_history: Optional[list[dict]] = None,
+    *,
+    pod_manager: Optional[PodManager] = None,
+    namespace: Optional[str] = None,
+    kubeconfig: Optional[str] = None,
 ) -> ToolResult:
     """Route a tool call to the appropriate handler.
 
@@ -1477,6 +1641,12 @@ def dispatch_tool(
     command_history : list[dict] or None
         Mutable list to track command history across the agent session.
         If None, a temporary list is used (history is discarded).
+    pod_manager : PodManager or None
+        Pod manager for create/delete pod operations.
+    namespace : str or None
+        OpenShift namespace (used to create temp OcExecutors for experiment pods).
+    kubeconfig : str or None
+        Kubeconfig path (used to create temp OcExecutors for experiment pods).
 
     Returns
     -------
@@ -1495,7 +1665,21 @@ def dispatch_tool(
             error=f"Unknown tool: '{name}'. Available tools: {list(_TOOL_HANDLERS.keys())}",
         )
 
-    return handler(args, executor, command_history)
+    # For pod manager tools, pass pod_manager as keyword arg
+    if name in _POD_MANAGER_HANDLERS:
+        return handler(args, executor, command_history, pod_manager=pod_manager)
+
+    # For pod-aware tools, create a temp OcExecutor if pod_name is specified
+    target_executor = executor
+    pod_name = args.pop("pod_name", None) if name in _POD_AWARE_HANDLERS else None
+    if pod_name and namespace:
+        target_executor = OcExecutor(
+            namespace=namespace,
+            pod_name=pod_name,
+            kubeconfig=kubeconfig,
+        )
+
+    return handler(args, target_executor, command_history)
 
 
 # ---------------------------------------------------------------------------
@@ -1514,10 +1698,16 @@ class AgentTools:
         executor: RemoteExecutor,
         vllm_endpoint: str = "http://localhost:8000",
         model_name: str = "",
+        pod_manager: Optional[PodManager] = None,
+        namespace: Optional[str] = None,
+        kubeconfig: Optional[str] = None,
     ):
         self.executor = executor
         self.vllm_endpoint = vllm_endpoint
         self.model_name = model_name
+        self.pod_manager = pod_manager
+        self.namespace = namespace
+        self.kubeconfig = kubeconfig
         self.command_history: list[dict] = []
 
     def get_tool_definitions(self) -> list[dict]:
@@ -1527,14 +1717,20 @@ class AgentTools:
     def dispatch(self, name: str, args: dict) -> ToolResult:
         """Dispatch a tool call, tracking history on this instance.
 
-        For run_benchmark, always uses the CLI-provided endpoint and model
-        (the agent may see different ports/models inside the pod, but the
-        benchmark runs locally against the port-forwarded endpoint).
+        For run_benchmark, uses the agent-supplied endpoint if provided,
+        otherwise falls back to the CLI-provided baseline endpoint.
+        Model name is always filled from CLI args.
         """
         if name == "run_benchmark":
-            args["endpoint"] = self.vllm_endpoint
+            if "endpoint" not in args or not args.get("endpoint"):
+                args["endpoint"] = self.vllm_endpoint  # baseline default
             args["model"] = self.model_name
-        return dispatch_tool(name, args, self.executor, self.command_history)
+        return dispatch_tool(
+            name, args, self.executor, self.command_history,
+            pod_manager=self.pod_manager,
+            namespace=self.namespace,
+            kubeconfig=self.kubeconfig,
+        )
 
     # Convenience methods for direct (non-agent) use
 

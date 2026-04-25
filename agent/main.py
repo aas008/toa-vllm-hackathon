@@ -3,6 +3,7 @@
 vLLM Performance Tuning Agent - CLI Entry Point
 """
 import argparse
+import atexit
 import os
 import sys
 
@@ -10,6 +11,7 @@ from .llm import ClaudeClient, get_model_id
 from .ssh_client import SSHClient
 from .agentic import AgenticRunner
 from .tools import AgentTools, OcExecutor, SSHExecutor
+from .pod_manager import PodManager
 from .reporter import Reporter, TuningReport
 
 
@@ -115,6 +117,15 @@ Available Claude models: sonnet (default), opus, haiku
         "--kubeconfig",
         default=os.environ.get("KUBECONFIG"),
         help="Path to kubeconfig file (default: $KUBECONFIG)"
+    )
+    parser.add_argument(
+        "--pod-template",
+        default=None,
+        help=(
+            "Path to a pod YAML template for creating experiment pods "
+            "(e.g. aanya-pod.yaml). Enables the create_vllm_pod/delete_vllm_pod tools. "
+            "Requires --oc-mode."
+        ),
     )
 
     # Vertex AI options
@@ -241,11 +252,30 @@ def main():
     print(f"\n  Token usage so far:")
     print(f"  {llm.get_usage_report()}")
 
+    # Create PodManager if --pod-template is provided
+    pod_manager = None
+    if args.pod_template:
+        if not args.oc_mode:
+            print("Error: --pod-template requires --oc-mode")
+            sys.exit(1)
+        print_step(f"Initializing PodManager with template: {args.pod_template}")
+        pod_manager = PodManager(
+            namespace=args.oc_namespace,
+            kubeconfig=args.kubeconfig,
+            base_pod_yaml_path=args.pod_template,
+        )
+        # Register cleanup to delete leftover experiment pods on exit
+        atexit.register(pod_manager.cleanup_all)
+        print(f"  PodManager ready (namespace={args.oc_namespace})")
+
     # Create tools and agent
     tools = AgentTools(
         executor=executor,
         vllm_endpoint=args.vllm_endpoint,
         model_name=args.model,
+        pod_manager=pod_manager,
+        namespace=args.oc_namespace if args.oc_mode else None,
+        kubeconfig=args.kubeconfig,
     )
 
     agent = AgenticRunner(
@@ -259,7 +289,12 @@ def main():
 
     # Run the agent loop
     print_step("Starting agent loop...")
-    state = agent.run()
+    try:
+        state = agent.run()
+    finally:
+        # Ensure experiment pods are cleaned up even on exceptions
+        if pod_manager:
+            pod_manager.cleanup_all()
 
     # Generate report
     print_step("Generating report...")

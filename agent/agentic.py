@@ -45,20 +45,48 @@ TOOLS AVAILABLE:
 - compare_benchmarks: Compare two benchmark JSON files to detect regressions (runs LOCALLY)
 - analyze_trace: Analyze a PyTorch profiler Chrome trace JSON (runs LOCALLY)
 - map_kernel: Map a CUDA kernel name to its source and category (runs LOCALLY)
+- create_vllm_pod: Create an experiment pod with extra vLLM args (returns pod_name + endpoint)
+- delete_vllm_pod: Delete an experiment pod and clean up port-forward
 - done: Signal completion with summary
 
 ARCHITECTURE:
-- run_command/read_file/write_file/fetch_vllm_logs execute INSIDE the vLLM pod.
-- run_benchmark/read_benchmark_results/compare_benchmarks run LOCALLY.
-- run_benchmark endpoint and model are AUTO-FILLED — just specify the profile name.
+- The BASELINE pod is running and port-forwarded. It is NEVER modified or restarted.
+- For each tuning experiment, create a NEW pod with create_vllm_pod.
+- run_command/read_file/write_file/fetch_vllm_logs execute INSIDE a pod.
+  Pass pod_name to target an experiment pod; omit to target the baseline pod.
+- run_benchmark runs LOCALLY. Pass endpoint from create_vllm_pod to benchmark
+  an experiment pod; omit endpoint to benchmark the baseline.
+- run_benchmark model is AUTO-FILLED — just specify the profile name (and endpoint if experiment).
+
+TUNING WORKFLOW (follow this order strictly):
+1. Benchmark the BASELINE pod (already running, uses default endpoint):
+   a. Call run_benchmark with profile="balanced" (no endpoint needed — uses baseline)
+   b. Call fetch_vllm_logs (no pod_name — reads baseline pod logs)
+   c. Call read_benchmark_results with the JSON path from step 1a
+   → Save the baseline JSON path for later comparison.
+
+2. For EACH tuning experiment:
+   a. Call create_vllm_pod with vllm_args (e.g. ["--enable-chunked-prefill"])
+      → Returns pod_name and endpoint (e.g. "http://localhost:8001")
+   b. Call run_benchmark with profile="balanced" AND endpoint from step 2a
+   c. Call fetch_vllm_logs with pod_name from step 2a (reads experiment pod logs)
+   d. Call read_benchmark_results with the JSON path from step 2b
+   e. Call compare_benchmarks with baseline JSON (from step 1c) and experiment JSON (from step 2d)
+   f. Call delete_vllm_pod with pod_name from step 2a to clean up
+
+3. NEVER kill processes on the baseline pod. NEVER restart the baseline pod.
+   All tuning is done by creating fresh experiment pods with different args.
+
+4. Call done with all comparison results when finished.
 
 MANDATORY WORKFLOW FOR EACH BENCHMARK CYCLE:
 After EVERY run_benchmark call, you MUST do BOTH of these before making any decisions:
 
-1. CALL fetch_vllm_logs: This parses the vLLM server logs and returns structured data:
-   server config (model, non-default args), engine config (dtype, quantization, TP,
-   chunked prefill, CUDA graphs), memory (KV cache size, model memory), compilation
-   (attention backend, torch.compile time), and warnings/errors.
+1. CALL fetch_vllm_logs (with pod_name if experiment pod): This parses the vLLM
+   server logs and returns structured data: server config (model, non-default args),
+   engine config (dtype, quantization, TP, chunked prefill, CUDA graphs),
+   memory (KV cache size, model memory), compilation (attention backend,
+   torch.compile time), and warnings/errors.
 
 2. CALL read_benchmark_results with the JSON path from run_benchmark output:
    This returns structured per-concurrency metrics: success rate, throughput,
@@ -70,11 +98,11 @@ AFTER TUNING, use compare_benchmarks:
 
 IF BENCHMARK FAILS (errored requests > 0):
 - Do NOT call done. Do NOT give up.
-- Call fetch_vllm_logs to understand WHY requests are failing
+- Call fetch_vllm_logs (with pod_name if experiment) to understand WHY requests are failing
 - Common causes: model not loaded, wrong model name, OOM, CUDA error, timeout
-- Try: run_command "curl -s http://localhost:8000/health" (inside pod)
+- Try: run_command "curl -s http://localhost:8000/health" (inside pod, use pod_name for experiment)
 - Try: run_command "curl -s http://localhost:8000/v1/models" (inside pod)
-- Fix the issue, then re-run the benchmark
+- If an experiment pod is broken, delete it and try different args
 
 KEY METRICS (from GuideLLM output):
 - Output Token Throughput (tokens/sec) — higher = better
@@ -83,17 +111,17 @@ KEY METRICS (from GuideLLM output):
 - TPOT - Time Per Output Token (ms) at P50, P95, P99 — lower = better
 - Request Success Rate (%) — must be > 0 to be useful
 
-VLLM TUNABLE PARAMETERS:
-1. max-num-seqs (1-1024, default 256): Max concurrent sequences per iteration
-2. max-num-batched-tokens (256-32768, default auto): Max tokens per batch
-3. gpu-memory-utilization (0.80-0.95, default 0.90): GPU memory for KV cache
-4. enable-chunked-prefill (bool, default false): Chunk long prefills
-5. enable-prefix-caching (bool, default false): Cache common prefixes
-6. max-model-len (int, default auto): Max context length
-7. enforce-eager (bool, default false): Disable CUDA graphs
-8. tensor-parallel-size (1-8, default 1): Multi-GPU parallelism
-9. quantization (null/fp8/awq/gptq): Quantization method
-10. scheduling-policy (fcfs/priority): Request scheduling
+VLLM TUNABLE PARAMETERS (pass these to create_vllm_pod as vllm_args):
+1. --max-num-seqs (1-1024, default 256): Max concurrent sequences per iteration
+2. --max-num-batched-tokens (256-32768, default auto): Max tokens per batch
+3. --gpu-memory-utilization (0.80-0.95, default 0.90): GPU memory for KV cache
+4. --enable-chunked-prefill (bool, default false): Chunk long prefills
+5. --enable-prefix-caching (bool, default false): Cache common prefixes
+6. --max-model-len (int, default auto): Max context length
+7. --enforce-eager (bool, default false): Disable CUDA graphs
+8. --tensor-parallel-size (1-8, default 1): Multi-GPU parallelism
+9. --quantization (null/fp8/awq/gptq): Quantization method
+10. --scheduling-policy (fcfs/priority): Request scheduling
 
 ANALYSIS GUIDELINES:
 - If TTFT is high: prefill is slow → try chunked-prefill or prefix-caching
@@ -102,22 +130,13 @@ ANALYSIS GUIDELINES:
 - If OOM errors: reduce gpu-memory-utilization or max-num-seqs
 - If all requests error: check vLLM health, model loading, port-forwarding
 
-RESTARTING VLLM:
-If you need to restart vLLM with new parameters:
-1. First read the current launch command: cat /proc/1/cmdline | tr '\\0' ' '
-2. Kill the process: kill 1
-3. Start it again with your changes, using the SAME base command plus new args
-4. Wait for health: retry "curl -s http://localhost:8000/health" every 5s, up to 60s
-5. If it doesn't come back within 60s, call done and report the failure
-Do NOT spend more than 3 iterations trying to recover a stuck server.
-
 RULES:
+- NEVER modify, kill, or restart the baseline pod
 - ALWAYS call fetch_vllm_logs AND read_benchmark_results after each benchmark
-- ONE parameter change at a time
+- ONE parameter change at a time (one experiment pod per tuning attempt)
+- ALWAYS delete experiment pods after benchmarking (call delete_vllm_pod)
 - Compare metrics before vs after each change using compare_benchmarks
-- Only call done when you have actual performance numbers to report
-- If you kill vLLM, you MUST restart it immediately with the correct command
-- Do NOT spend more than 3 iterations debugging a stuck/crashed server"""
+- Only call done when you have actual performance numbers to report"""
 
 
 class AgenticRunner:
@@ -154,32 +173,43 @@ class AgenticRunner:
         self.messages = [
             {
                 "role": "user",
-                "content": f"""You are connected to a vLLM inference server.
+                "content": f"""You are connected to a vLLM inference server (baseline pod).
 
-Endpoint (port-forwarded, for benchmarks): {self.vllm_endpoint}
+Baseline endpoint (port-forwarded): {self.vllm_endpoint}
 Model: {self.model_name}
 Profiles to benchmark: {', '.join(self.profiles)}
 
 CRITICAL RULES:
-- The run_benchmark tool runs LOCALLY and the endpoint/model are AUTO-FILLED. Just specify profile.
-- Do NOT pass endpoint or model to run_benchmark. Only pass profile (e.g. profile="balanced").
-- You MUST call run_benchmark within the first 3 tool calls. No exceptions.
-- Do NOT call curl, cat logs, journalctl, or any other exploration commands before benchmarking.
+- The BASELINE pod is NEVER modified or restarted. It serves as your reference.
+- To test tuning parameters, create EXPERIMENT pods with create_vllm_pod.
+- For baseline benchmarks, call run_benchmark with just profile (endpoint auto-filled).
+- For experiment benchmarks, pass the endpoint returned by create_vllm_pod.
 - NEVER call done after a benchmark failure. Diagnose from vLLM logs instead.
 
 EXACT STEPS (follow this order strictly):
+
+Phase 1 — Baseline:
 1. Call run_command with command="nvidia-smi" (1 tool call)
 2. Call run_command with command="cat /proc/1/cmdline | tr '\\0' ' '" (see vLLM launch args)
-3. Call run_benchmark with profile="balanced" (THIS IS MANDATORY ON STEP 3)
-4. AFTER benchmark completes, ALWAYS call BOTH of these tools:
-   a. fetch_vllm_logs (parses vLLM server config, memory, errors from pod logs)
+3. Call run_benchmark with profile="balanced" (THIS IS MANDATORY ON STEP 3 — uses baseline)
+4. AFTER benchmark completes, ALWAYS call BOTH:
+   a. fetch_vllm_logs (parses baseline pod's vLLM server config, memory, errors)
    b. read_benchmark_results with the JSON path from step 3 output
-5. If benchmark had errors: diagnose from fetch_vllm_logs output, fix issues, re-benchmark
-6. If benchmark succeeded: analyze metrics, tune parameters, re-benchmark
-7. After tuning + re-benchmark, call compare_benchmarks with baseline and new JSON paths
-8. Call done ONLY when you have actual performance numbers to report
+   → SAVE the baseline JSON path for later compare_benchmarks calls.
 
-Steps 4a and 4b are MANDATORY after every benchmark."""
+Phase 2 — Experiments (repeat for each tuning attempt):
+5. Call create_vllm_pod with vllm_args (e.g. ["--enable-chunked-prefill"])
+   → Note the returned pod_name and endpoint
+6. Call run_benchmark with profile="balanced" AND endpoint from step 5
+7. Call fetch_vllm_logs with pod_name from step 5
+8. Call read_benchmark_results with the JSON path from step 6
+9. Call compare_benchmarks with baseline JSON (step 4b) and experiment JSON (step 8)
+10. Call delete_vllm_pod with pod_name from step 5
+
+Phase 3 — Completion:
+11. After all experiments, call done with a summary of all comparison results.
+
+Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
             }
         ]
 
