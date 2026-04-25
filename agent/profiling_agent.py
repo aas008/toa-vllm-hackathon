@@ -17,6 +17,10 @@ from typing import Optional
 class ProfilingState:
     """State for the profiling agent."""
     iteration: int = 0
+    baseline_results: dict = field(default_factory=dict)
+    current_results: dict = field(default_factory=dict)
+    actions_taken: list = field(default_factory=list)
+    kernel_analysis: dict = field(default_factory=dict)
     baseline_profile: dict = field(default_factory=dict)
     experiment_profiles: list = field(default_factory=list)
     findings: list = field(default_factory=list)

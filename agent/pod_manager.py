@@ -247,6 +247,10 @@ class PodManager:
 
         manifest = self._build_pod_manifest(pod_name, vllm_args)
 
+        # Add label for webhook matching (only profiled pods get instrumented)
+        labels = manifest["metadata"].setdefault("labels", {})
+        labels["managed-by"] = "profiler-agent"
+
         annotations = manifest["metadata"].setdefault("annotations", {})
         annotations.update(profiler_config.to_annotations())
 
