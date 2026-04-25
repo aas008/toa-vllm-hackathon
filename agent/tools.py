@@ -827,6 +827,18 @@ def _handle_run_benchmark(
     if processor.startswith("/models/"):
         processor = processor[len("/models/"):]
 
+    # Determine request type: chat/instruct models use chat_completions,
+    # base/causal models (opt, gpt2, etc.) need text_completions.
+    # Auto-detect from model name, with explicit override via request_type arg.
+    request_type = args.get("request_type")
+    if not request_type:
+        model_lower = model.lower()
+        _CHAT_INDICATORS = ("chat", "instruct", "it-", "-it", "rlhf")
+        if any(ind in model_lower for ind in _CHAT_INDICATORS):
+            request_type = "chat_completions"
+        else:
+            request_type = "text_completions"
+
     guidellm_cmd = [
         sys.executable, "-m", "guidellm", "benchmark", "run",
         f"--target={target_url}",
@@ -836,6 +848,7 @@ def _handle_run_benchmark(
         f"--max-seconds={max_seconds}",
         f"--rate={concurrency}",
         f"--output-path={output_path}",
+        f"--request-type={request_type}",
         "--processor-args", '{"trust-remote-code":"true"}',
         "--data", profile["data_flag"],
     ]
