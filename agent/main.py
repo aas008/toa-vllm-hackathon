@@ -264,12 +264,53 @@ def main():
     # Generate report
     print_step("Generating report...")
     from datetime import datetime
+
+    # Extract GPU info and actions from command history
+    gpu_info = ""
+    actions = list(state.actions_taken)
+    for entry in tools.command_history:
+        out = entry.get("output", "")
+        cmd = entry.get("command", "")
+        if entry.get("tool") == "run_command" and "nvidia-smi" in cmd and out:
+            # Pull GPU name from nvidia-smi output
+            for line in out.split("\n"):
+                if "NVIDIA" in line and ("H100" in line or "H200" in line or "A100" in line or "GPU" in line):
+                    gpu_info = line.strip()
+                    break
+        if entry.get("tool") == "run_command" and entry.get("success"):
+            actions.append({
+                "type": "run_command",
+                "command": cmd[:80],
+                "timestamp": "",
+            })
+
+    # Build summary from agent messages if the agent didn't call done
+    summary = state.summary
+    if summary == "Max iterations reached without completion.":
+        # Pull the last agent message as a summary
+        for msg in reversed(agent.messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("type") == "text":
+                            summary = block["text"][:500]
+                            break
+                        elif hasattr(block, "type") and block.type == "text":
+                            summary = block.text[:500]
+                            break
+                elif isinstance(content, str) and content:
+                    summary = content[:500]
+                if summary != "Max iterations reached without completion.":
+                    break
+
     report = TuningReport(
         timestamp=datetime.utcnow().strftime("%Y%m%d_%H%M%S"),
         model_name=args.model,
         vllm_endpoint=args.vllm_endpoint,
-        agent_summary=state.summary,
-        actions_taken=state.actions_taken,
+        gpu_info=gpu_info,
+        agent_summary=summary,
+        actions_taken=actions,
         kernel_analysis=state.kernel_analysis,
         token_usage=llm.get_usage_data(),
         decision_log=agent.get_decision_log(),
