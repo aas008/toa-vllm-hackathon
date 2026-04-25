@@ -1690,8 +1690,9 @@ def _handle_run_eval(
     })
 
     cmd = (
-        f"cd /tmp/toa-agent-run/repo && "
-        f"CUDA_VISIBLE_DEVICES={cuda_devices} vllm-bench run "
+        f"source /home/lab/.conda/etc/profile.d/conda.sh && conda activate vllm && "
+        f"cd /tmp/vllm-eval-pipeline && "
+        f"CUDA_VISIBLE_DEVICES={cuda_devices} python -m src run "
         f"--model {model} "
         f"--workload {workload} "
         f"--duration {duration} "
@@ -1700,7 +1701,7 @@ def _handle_run_eval(
         f"--max-num-seqs {max_num_seqs} "
         f"--gpu-memory-utilization {gpu_mem} "
         f"--port {port} "
-        f"--output-dir results"
+        f"--output-dir /tmp/vllm-eval-results"
     )
     if enforce_eager:
         cmd += " --enforce-eager"
@@ -1722,7 +1723,7 @@ def _handle_run_eval(
 
     # Read the latest result JSON from the results dir
     ls_result = executor.run(
-        "ls -t /tmp/toa-agent-run/repo/results/*.json 2>/dev/null | head -1",
+        "ls -t /tmp/vllm-eval-results/*.json 2>/dev/null | head -1",
         timeout=10,
     )
     if not ls_result.success or not ls_result.stdout.strip():
@@ -1820,8 +1821,9 @@ def _handle_analyze_eval_results(
     })
 
     cmd = (
-        f"cd /tmp/toa-agent-run/repo && "
-        f"vllm-bench analyze --results-dir results --objective {objective}"
+        f"source /home/lab/.conda/etc/profile.d/conda.sh && conda activate vllm && "
+        f"cd /tmp/vllm-eval-pipeline && "
+        f"python -m src analyze --results-dir /tmp/vllm-eval-results --objective {objective}"
     )
     if show_pareto:
         cmd += " --show-pareto"
