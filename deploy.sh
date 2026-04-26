@@ -33,6 +33,9 @@ for i in $(seq 1 60); do
   echo "  ...still loading ($((i*5))s)"
 done
 
-echo "Timed out waiting for server. Check logs:"
-echo "  ssh ${NODE} 'tmux capture-pane -t ${SESSION} -p | tail -30'"
+echo "Timed out waiting for server. Cleaning up..."
+ssh $SSH_OPTS "$NODE" "tmux kill-session -t ${SESSION}" || true
+ssh $SSH_OPTS "$NODE" "pkill -f 'vllm serve Qwen/Qwen3-0.6B'" || true
+ssh $SSH_OPTS "$NODE" "rm -f /tmp/vllm-qwen3-06b.log" || true
+echo "Deployment crashed: server did not become ready within 300 seconds."
 exit 1
