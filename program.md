@@ -1,4 +1,4 @@
-There are 4 GPUs available to us on node 09. GPU: 4,5,6,7
+There are 4 GPUs available to us on node 02. GPU: 4,5,6,7
 
 I started a vllm server using the following cmd:
 ```
@@ -66,7 +66,7 @@ uv run score.py benchmark_results/test-run/prefill_heavy.json
 3. You will have to report all your experiments and their results in a `.md` file in cwd.
 4. The benchmark_results/ dir will have differente sub dirs for each experiment. eg: benchmark_results/exp_001/prefill_heavy.json.
 5. The experiments that you will undertake, will have to be sequential.
-6. Port will always be 8100. And CUDA_VISIBLE_DEVICES=4,5,6,7. Thats it. You dont have to reserve gpus or anything. Node will always be 09.
+6. Port will always be 8100. And CUDA_VISIBLE_DEVICES=4,5,6,7. Thats it. You dont have to reserve gpus or anything. Node will always be 02.
 7. You can only edit `deploy.sh` and `report.md`. `report.md` will contain the final report.
 8. You will be given a cc/** git branch. Use that to maintain sanity across file edits.
 
