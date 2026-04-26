@@ -19,3 +19,4 @@ reports/
 
 # OS
 .DS_Store
+benchmark_results
