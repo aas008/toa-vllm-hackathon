@@ -16,7 +16,8 @@ VLLM_CMD="CUDA_VISIBLE_DEVICES=4,5,6,7 /home/lab/rawhad/venvs/vllm_venv/bin/vllm
 SERVER_DEPLOYMENT_CONFIG="--tensor-parallel-size 4 \
   --max-model-len 4096 \
   --gpu-memory-utilization 0.95 \
-  --enable-prefix-caching"
+  --disable-log-stats \
+  --max-num-batched-tokens 8192"
 # ===
 
 echo "Deploying qwen3-0.6b on ${NODE} GPU 4,5,6,7..."
