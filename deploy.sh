@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-NODE="rh-h100-09"
+NODE="rh-h100-02"
 SESSION="rohan-qwen3-06b"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
-VLLM_CMD="CUDA_VISIBLE_DEVICES=4,5,6,7 /home/lab/rawhad/vllm_venv/bin/vllm serve Qwen/Qwen3-0.6B \
+VLLM_CMD="CUDA_VISIBLE_DEVICES=4,5,6,7 /home/lab/rawhad/venvs/vllm_venv/bin/vllm serve Qwen/Qwen3-0.6B \
   --served-model-name qwen3-0.6b \
   --host 0.0.0.0 \
   --port 8100"
