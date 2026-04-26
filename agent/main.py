@@ -106,6 +106,16 @@ Available Claude models: sonnet (default), opus, haiku
             "post-run analysis. Files saved to the output directory."
         ),
     )
+    parser.add_argument(
+        "--langfuse",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable Langfuse observability. Sends traces, spans, and generations "
+            "to a Langfuse instance. Requires LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, "
+            "and LANGFUSE_BASE_URL environment variables."
+        ),
+    )
 
     # Execution mode: SSH or oc exec
     parser.add_argument(
@@ -329,6 +339,16 @@ def main():
         debug_recorder = DebugRecorder(args.output, agent_type=agent_type)
         print_step(f"Debug recording enabled: {debug_recorder.path}")
 
+    # Set up Langfuse if requested
+    langfuse_enabled = False
+    if args.langfuse:
+        from .langfuse_integration import init_langfuse
+        langfuse_enabled = init_langfuse()
+        if langfuse_enabled:
+            print_step(f"Langfuse enabled: {os.environ.get('LANGFUSE_BASE_URL', 'cloud')}")
+        else:
+            print("Warning: --langfuse specified but LANGFUSE_PUBLIC_KEY not set")
+
     if args.profile:
         from .profiling_agent import ProfilingRunner
         agent = ProfilingRunner(
@@ -338,6 +358,7 @@ def main():
             vllm_endpoint=args.vllm_endpoint,
             model_name=args.model,
             debug_recorder=debug_recorder,
+            langfuse_enabled=langfuse_enabled,
         )
     else:
         agent = AgenticRunner(
@@ -348,6 +369,7 @@ def main():
             model_name=args.model,
             profiles=args.profiles,
             debug_recorder=debug_recorder,
+            langfuse_enabled=langfuse_enabled,
         )
 
     # Run the agent loop

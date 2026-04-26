@@ -127,6 +127,7 @@ class ProfilingRunner:
         vllm_endpoint: str = "http://localhost:8000",
         model_name: str = "",
         debug_recorder=None,
+        langfuse_enabled: bool = False,
     ):
         self.tools = tools
         self.llm = llm_client
@@ -137,8 +138,29 @@ class ProfilingRunner:
         self.messages: list = []
         self.decision_log: list = []
         self.debug = debug_recorder
+        self._lf_observe = None
+        if langfuse_enabled:
+            from .langfuse_integration import get_observe
+            self._lf_observe = get_observe()
 
     def run(self) -> ProfilingState:
+        if self._lf_observe:
+            return self._run_observed()
+        return self._run_inner()
+
+    def _run_observed(self) -> ProfilingState:
+        observe = self._lf_observe
+
+        @observe(name="vllm_profiling_run")
+        def traced_run(model, endpoint):
+            return self._run_inner()
+
+        result = traced_run(self.model_name, self.vllm_endpoint)
+        from .langfuse_integration import flush_langfuse
+        flush_langfuse()
+        return result
+
+    def _run_inner(self) -> ProfilingState:
         """Run the profiling agent loop."""
         print(">> Starting vLLM GPU profiling agent...", flush=True)
 
@@ -241,6 +263,17 @@ Start now with step 1."""
         self.messages.append({"role": "user", "content": tool_results})
 
     def _execute_tool(self, name: str, inputs: dict, tool_use_id: str) -> dict:
+        if self._lf_observe:
+            observe = self._lf_observe
+
+            @observe(name=f"tool_{name}")
+            def traced(tool_name, tool_inputs):
+                return self._execute_tool_inner(tool_name, tool_inputs, tool_use_id)
+
+            return traced(name, inputs)
+        return self._execute_tool_inner(name, inputs, tool_use_id)
+
+    def _execute_tool_inner(self, name: str, inputs: dict, tool_use_id: str) -> dict:
         print(f"   Tool: {name}", flush=True)
 
         log_entry = {

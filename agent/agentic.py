@@ -268,6 +268,7 @@ class AgenticRunner:
         profiles: list = None,
         enable_cost_optimization: bool = True,
         debug_recorder=None,
+        langfuse_enabled: bool = False,
     ):
         self.tools = tools
         self.llm = llm_client
@@ -282,9 +283,34 @@ class AgenticRunner:
         self.debug = debug_recorder
         self._benchmark_called = False
         self._nudge_sent = False
+        self._lf_observe = None
+        if langfuse_enabled:
+            from .langfuse_integration import get_observe
+            self._lf_observe = get_observe()
 
     def run(self) -> AgentState:
         """Run the autonomous agent loop."""
+        if self._lf_observe:
+            return self._run_observed()
+        return self._run_inner()
+
+    def _run_observed(self) -> AgentState:
+        """Wrap the run with Langfuse @observe for tracing."""
+        observe = self._lf_observe
+
+        @observe(name="vllm_tuning_run")
+        def traced_run(model, endpoint, profiles, max_iters):
+            return self._run_inner()
+
+        result = traced_run(
+            self.model_name, self.vllm_endpoint,
+            self.profiles, self.max_iterations,
+        )
+        from .langfuse_integration import flush_langfuse
+        flush_langfuse()
+        return result
+
+    def _run_inner(self) -> AgentState:
         print(">> Starting vLLM performance tuning agent...", flush=True)
 
         # Initialize conversation
@@ -448,6 +474,20 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
 
     def _execute_tool(self, name: str, inputs: dict, tool_use_id: str) -> dict:
         """Execute a single tool and return result."""
+        if self._lf_observe:
+            return self._execute_tool_observed(name, inputs, tool_use_id)
+        return self._execute_tool_inner(name, inputs, tool_use_id)
+
+    def _execute_tool_observed(self, name, inputs, tool_use_id):
+        observe = self._lf_observe
+
+        @observe(name=f"tool_{name}")
+        def traced_tool(tool_name, tool_inputs):
+            return self._execute_tool_inner(tool_name, tool_inputs, tool_use_id)
+
+        return traced_tool(name, inputs)
+
+    def _execute_tool_inner(self, name: str, inputs: dict, tool_use_id: str) -> dict:
         print(f"   Tool: {name}", flush=True)
 
         # Log decision (output filled in after execution)
