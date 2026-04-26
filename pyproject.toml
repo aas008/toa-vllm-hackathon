@@ -1,0 +1,13 @@
+[project]
+name = "toa-vllm-hackathon-rohan"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "guidellm[recommended]>=0.6.0",
+    "httpx>=0.28.1",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.9",
+    "pandas>=3.0.2",
+]
