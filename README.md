@@ -4,6 +4,13 @@
 
 A CLI-based agentic loop that automatically benchmarks, profiles, analyzes, and tunes a vLLM inference server — then outputs a markdown report.
 
+Demo:
+
+
+https://github.com/user-attachments/assets/eefde2d6-9755-42c2-ace4-53d7aeb5b98c
+
+
+
 ## Quick Start
 
 ```bash
