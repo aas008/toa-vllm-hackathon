@@ -267,6 +267,7 @@ class AgenticRunner:
         model_name: str = "",
         profiles: list = None,
         enable_cost_optimization: bool = True,
+        debug_recorder=None,
     ):
         self.tools = tools
         self.llm = llm_client
@@ -278,6 +279,7 @@ class AgenticRunner:
         self.messages: list = []
         self.decision_log: list = []
         self.enable_cost_optimization = enable_cost_optimization
+        self.debug = debug_recorder
         self._benchmark_called = False
         self._nudge_sent = False
 
@@ -385,7 +387,6 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
 
     def _call_llm_with_tools(self):
         """Call LLM with tool definitions and cost optimizations."""
-        # Build system prompt with caching
         if self.enable_cost_optimization:
             system_content = [{
                 "type": "text",
@@ -397,6 +398,12 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
 
         model = self.llm.model
 
+        if self.debug:
+            if self.state.iteration == 1:
+                self.debug.record_system_prompt(SYSTEM_PROMPT)
+                self.debug.record_tools(self.tools.get_tool_definitions())
+            self.debug.record_llm_request(model, self.messages, self.state.iteration)
+
         response = self.llm.client.messages.create(
             model=model,
             max_tokens=4096,
@@ -405,11 +412,22 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
             messages=self.messages,
         )
 
-        # Track tokens
         self.llm._get_usage(model).add(
             response.usage.input_tokens,
             response.usage.output_tokens
         )
+
+        if self.debug:
+            self.debug.record_llm_response(
+                model=model,
+                stop_reason=response.stop_reason,
+                content=response.content,
+                usage={
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                },
+                iteration=self.state.iteration,
+            )
 
         return response
 
@@ -486,6 +504,15 @@ Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
                 print(f"      {cmd_preview}", flush=True)
 
         log_entry["output"] = output[:6000]
+
+        if self.debug:
+            self.debug.record_tool_call(name, inputs, tool_use_id, self.state.iteration)
+            self.debug.record_tool_result(
+                name, name != "done" and not output.startswith("Error:"),
+                output, iteration=self.state.iteration,
+            )
+            if name in ("run_benchmark", "collect_profile", "query_knowledge_base"):
+                self.debug.record_full_tool_output(name, output, self.state.iteration)
 
         # Benchmark output includes Prometheus delta — give it more room
         max_content = 16000 if name == "run_benchmark" else 8000

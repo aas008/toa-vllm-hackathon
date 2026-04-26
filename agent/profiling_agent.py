@@ -126,6 +126,7 @@ class ProfilingRunner:
         max_iterations: int = 15,
         vllm_endpoint: str = "http://localhost:8000",
         model_name: str = "",
+        debug_recorder=None,
     ):
         self.tools = tools
         self.llm = llm_client
@@ -135,6 +136,7 @@ class ProfilingRunner:
         self.state = ProfilingState()
         self.messages: list = []
         self.decision_log: list = []
+        self.debug = debug_recorder
 
     def run(self) -> ProfilingState:
         """Run the profiling agent loop."""
@@ -192,18 +194,38 @@ Start now with step 1."""
             "cache_control": {"type": "ephemeral"}
         }]
 
+        model = self.llm.model
+
+        if self.debug:
+            if self.state.iteration == 1:
+                self.debug.record_system_prompt(PROFILING_SYSTEM_PROMPT)
+                self.debug.record_tools(self.tools.get_tool_definitions())
+            self.debug.record_llm_request(model, self.messages, self.state.iteration)
+
         response = self.llm.client.messages.create(
-            model=self.llm.model,
+            model=model,
             max_tokens=4096,
             system=system_content,
             tools=self.tools.get_tool_definitions(),
             messages=self.messages,
         )
 
-        self.llm._get_usage(self.llm.model).add(
+        self.llm._get_usage(model).add(
             response.usage.input_tokens,
             response.usage.output_tokens
         )
+
+        if self.debug:
+            self.debug.record_llm_response(
+                model=model,
+                stop_reason=response.stop_reason,
+                content=response.content,
+                usage={
+                    "input_tokens": response.usage.input_tokens,
+                    "output_tokens": response.usage.output_tokens,
+                },
+                iteration=self.state.iteration,
+            )
 
         return response
 
@@ -251,6 +273,15 @@ Start now with step 1."""
                     pass
 
         log_entry["output"] = output[:6000]
+
+        if self.debug:
+            self.debug.record_tool_call(name, inputs, tool_use_id, self.state.iteration)
+            self.debug.record_tool_result(
+                name, name != "done" and not output.startswith("Error:"),
+                output, iteration=self.state.iteration,
+            )
+            if name in ("collect_profile", "query_knowledge_base"):
+                self.debug.record_full_tool_output(name, output, self.state.iteration)
 
         max_content = 16000 if name == "collect_profile" else 8000
         return {

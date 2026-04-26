@@ -96,6 +96,16 @@ Available Claude models: sonnet (default), opus, haiku
         action="store_true",
         help="Verbose output"
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable debug recording. Saves full LLM conversation transcript "
+            "(prompts, responses, tool calls, tool outputs) as JSONL for "
+            "post-run analysis. Files saved to the output directory."
+        ),
+    )
 
     # Execution mode: SSH or oc exec
     parser.add_argument(
@@ -311,6 +321,14 @@ def main():
         knowledge_base=knowledge_base,
     )
 
+    # Set up debug recorder if requested
+    debug_recorder = None
+    if args.debug:
+        from .debug_recorder import DebugRecorder
+        agent_type = "profiling" if args.profile else "tuning"
+        debug_recorder = DebugRecorder(args.output, agent_type=agent_type)
+        print_step(f"Debug recording enabled: {debug_recorder.path}")
+
     if args.profile:
         from .profiling_agent import ProfilingRunner
         agent = ProfilingRunner(
@@ -319,6 +337,7 @@ def main():
             max_iterations=args.max_iterations,
             vllm_endpoint=args.vllm_endpoint,
             model_name=args.model,
+            debug_recorder=debug_recorder,
         )
     else:
         agent = AgenticRunner(
@@ -328,6 +347,7 @@ def main():
             vllm_endpoint=args.vllm_endpoint,
             model_name=args.model,
             profiles=args.profiles,
+            debug_recorder=debug_recorder,
         )
 
     # Run the agent loop
@@ -338,6 +358,9 @@ def main():
     finally:
         if pod_manager:
             pod_manager.cleanup_all()
+        if debug_recorder:
+            debug_recorder.close()
+            print(f"  Debug transcript: {debug_recorder.path}")
 
     # Generate report
     print_step("Generating report...")
