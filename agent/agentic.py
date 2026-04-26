@@ -59,6 +59,12 @@ TOOLS AVAILABLE:
 - map_kernel(kernel_name): Map CUDA kernel to source and category
 - create_vllm_pod(vllm_args): Create experiment pod, returns (pod_name, endpoint)
 - delete_vllm_pod(pod_name): Delete experiment pod + port-forward cleanup
+- check_vllm_startup(pod_name=None, intended_args=None): Analyze vLLM startup
+    logs for errors and config mismatches. Checks BEFORE server-ready marker.
+    Use after creating experiment pods, especially when benchmarks fail.
+- check_benchmark_health(benchmark_output, benchmark_json_path=None): Analyze
+    benchmark output for anomalies: connection failures, high error rates,
+    zero throughput, Prometheus warnings. Use when results look unexpected.
 - query_knowledge_base(topic, max_results=3): Search vLLM knowledge base for
     concepts, techniques, architectures, optimization strategies. Use BEFORE
     making tuning decisions to understand tradeoffs. Available only if
@@ -150,26 +156,19 @@ AFTER TUNING, use compare_benchmarks:
    comparison with regression detection (2% threshold, metric directionality aware).
 
 IF BENCHMARK FAILS (errored requests > 0 OR zero successful requests):
-- Do NOT call done. Do NOT give up. DIAGNOSE from BOTH sides:
+- Do NOT call done. Do NOT give up. Use the log analyzers:
 
-1. CHECK VLLM POD LOGS:
-   - fetch_vllm_logs(pod_name=<experiment_pod>) — look for OOM, CUDA error,
-     model loading failure, assertion errors, worker crashes
-   - run_command("curl -s http://localhost:8000/health", pod_name=<pod>)
-   - run_command("curl -s http://localhost:8000/v1/models", pod_name=<pod>)
+1. call check_vllm_startup(pod_name=<experiment_pod>, intended_args=<the vllm_args you used>)
+   → Checks startup logs for OOM, CUDA errors, config mismatches, crashes
+   → Focuses on log section BEFORE server-ready marker
 
-2. CHECK BENCHMARK POD: If the benchmark reports 0 successful requests,
-   the vLLM pod was likely unreachable or crashed during the run.
-   Common causes:
-   - Pod not ready yet (readiness probe passed but model not fully loaded)
-   - OOM during first request (vLLM args caused too much memory allocation)
-   - Wrong model name in benchmark vs what vLLM serves
-   - Network issue (pod IP changed, port not listening)
+2. call check_benchmark_health(benchmark_output=<the run_benchmark output text>)
+   → Checks for connection failures, error rates, zero throughput, Prometheus warnings
 
 3. AFTER DIAGNOSIS:
    - If OOM: delete pod, try with lower gpu-memory-utilization or fewer seqs
-   - If model error: check --served-model-name matches
-   - If pod crashed: fetch_vllm_logs to see the crash reason, try different args
+   - If config mismatch: check that intended args match what vLLM actually loaded
+   - If connection error: pod crashed or never started, check startup analysis
    - If timeout: increase benchmark max-seconds
 
 KEY METRICS (from GuideLLM output):

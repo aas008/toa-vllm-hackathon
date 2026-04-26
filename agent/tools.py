@@ -743,6 +743,58 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "check_vllm_startup",
+        "description": (
+            "Analyze vLLM pod startup logs for errors and config mismatches. "
+            "Focuses on the log section BEFORE the server becomes ready. "
+            "Checks for: OOM errors, CUDA failures, model loading issues, "
+            "config mismatches vs intended args, fallback warnings, crashes. "
+            "Use this AFTER creating an experiment pod to verify it started correctly, "
+            "especially when benchmarks show 0 successful requests."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pod_name": {
+                    "type": "string",
+                    "description": "Pod name to analyze. If omitted, uses baseline pod.",
+                },
+                "intended_args": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "CLI args the pod was launched with (e.g. ['--max-num-seqs', '512']). "
+                        "Used to detect config mismatches in actual startup logs."
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "check_benchmark_health",
+        "description": (
+            "Analyze benchmark output for anomalies: connection failures, high error rates, "
+            "zero throughput, timeout issues, and server-side problems from Prometheus metrics. "
+            "Use this AFTER a benchmark that shows unexpected results (high error rate, "
+            "low throughput, or 0 successful requests) to diagnose the root cause."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "benchmark_output": {
+                    "type": "string",
+                    "description": "Raw benchmark output text from run_benchmark.",
+                },
+                "benchmark_json_path": {
+                    "type": "string",
+                    "description": "Path to benchmark JSON file for deeper analysis.",
+                },
+            },
+            "required": ["benchmark_output"],
+        },
+    },
+    {
         "name": "done",
         "description": (
             "Signal that the tuning session is complete. Call this when you have "
@@ -2250,6 +2302,70 @@ def _handle_collect_profile(
     )
 
 
+def _handle_check_vllm_startup(
+    args: dict,
+    executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Analyze vLLM startup logs for errors and config mismatches."""
+    from .analysis.log_anomaly import analyze_vllm_startup, format_anomalies
+
+    command_history.append({"tool": "check_vllm_startup"})
+
+    # Get logs via oc logs (fast path for OcExecutor)
+    if isinstance(executor, OcExecutor):
+        oc_cmd = ["oc"]
+        if executor.kubeconfig:
+            oc_cmd += ["--kubeconfig", executor.kubeconfig]
+        oc_cmd += ["-n", executor.namespace, "logs", executor.pod_name]
+        log_result = subprocess.run(oc_cmd, capture_output=True, text=True, timeout=30)
+        raw_logs = log_result.stdout if log_result.returncode == 0 else ""
+    else:
+        result = executor.run("cat /proc/1/fd/1 2>/dev/null | head -500", timeout=30)
+        raw_logs = result.stdout if result.success else ""
+
+    if not raw_logs:
+        command_history[-1]["success"] = False
+        return ToolResult(tool="check_vllm_startup", success=False, output="", error="Could not retrieve logs")
+
+    intended_args = args.get("intended_args")
+    anomalies = analyze_vllm_startup(raw_logs, intended_args=intended_args)
+
+    output = format_anomalies(anomalies, title="vLLM Startup Analysis")
+    command_history[-1]["success"] = True
+    return ToolResult(tool="check_vllm_startup", success=True, output=output)
+
+
+def _handle_check_benchmark_health(
+    args: dict,
+    _executor: RemoteExecutor,
+    command_history: list[dict],
+) -> ToolResult:
+    """Analyze benchmark output for anomalies."""
+    from .analysis.log_anomaly import analyze_benchmark_logs, format_anomalies
+
+    command_history.append({"tool": "check_benchmark_health"})
+
+    benchmark_output = args.get("benchmark_output", "")
+    benchmark_json_path = args.get("benchmark_json_path")
+
+    benchmark_json = None
+    if benchmark_json_path:
+        import os
+        if os.path.exists(benchmark_json_path):
+            try:
+                with open(benchmark_json_path) as f:
+                    benchmark_json = json.load(f)
+            except Exception:
+                pass
+
+    anomalies = analyze_benchmark_logs(benchmark_output, benchmark_json=benchmark_json)
+
+    output = format_anomalies(anomalies, title="Benchmark Health Check")
+    command_history[-1]["success"] = True
+    return ToolResult(tool="check_benchmark_health", success=True, output=output)
+
+
 def _handle_done(
     args: dict,
     _executor: RemoteExecutor,
@@ -2292,6 +2408,8 @@ _TOOL_HANDLERS = {
     "scrape_vllm_metrics": _handle_scrape_vllm_metrics,
     "deploy_profiled_pod": _handle_deploy_profiled_pod,
     "collect_profile": _handle_collect_profile,
+    "check_vllm_startup": _handle_check_vllm_startup,
+    "check_benchmark_health": _handle_check_benchmark_health,
     "done": _handle_done,
 }
 
@@ -2302,7 +2420,7 @@ _POD_MANAGER_HANDLERS = {"create_vllm_pod", "delete_vllm_pod", "run_benchmark", 
 _METRICS_HANDLERS = {"scrape_vllm_metrics"}
 
 # Handlers that accept an executor override via pod_name arg
-_POD_AWARE_HANDLERS = {"run_command", "fetch_vllm_logs"}
+_POD_AWARE_HANDLERS = {"run_command", "fetch_vllm_logs", "check_vllm_startup"}
 
 
 def dispatch_tool(
