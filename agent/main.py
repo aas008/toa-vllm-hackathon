@@ -149,6 +149,16 @@ Available Claude models: sonnet (default), opus, haiku
         ),
     )
     parser.add_argument(
+        "--keep-prefix-caching",
+        action="store_true",
+        default=False,
+        help=(
+            "Keep prefix caching enabled on experiment pods (default: disabled). "
+            "By default, experiment pods add --no-enable-prefix-caching to ensure "
+            "fair comparison without warm cache advantage."
+        ),
+    )
+    parser.add_argument(
         "--knowledge-base",
         default=None,
         help=(
@@ -305,9 +315,12 @@ def main():
             kubeconfig=args.kubeconfig,
             base_pod_yaml_path=args.pod_template,
         )
+        if args.keep_prefix_caching:
+            pod_manager.disable_prefix_caching = False
         # Register cleanup to delete leftover experiment pods on exit
         atexit.register(pod_manager.cleanup_all)
-        print(f"  PodManager ready (namespace={args.oc_namespace})")
+        cache_status = "kept" if args.keep_prefix_caching else "disabled (--no-enable-prefix-caching)"
+        print(f"  PodManager ready (namespace={args.oc_namespace}, prefix caching on experiments: {cache_status})")
 
     # Load knowledge base if configured
     knowledge_base = None
@@ -388,24 +401,61 @@ def main():
     print_step("Generating report...")
     from datetime import datetime
 
-    # Extract GPU info and actions from command history
+    # Extract GPU info, vLLM launch args, and actions from command history
     gpu_info = ""
+    vllm_launch_args = ""
     actions = list(state.actions_taken)
     for entry in tools.command_history:
         out = entry.get("output", "")
         cmd = entry.get("command", "")
         if entry.get("tool") == "run_command" and "nvidia-smi" in cmd and out:
-            # Pull GPU name from nvidia-smi output
             for line in out.split("\n"):
                 if "NVIDIA" in line and ("H100" in line or "H200" in line or "A100" in line or "GPU" in line):
                     gpu_info = line.strip()
                     break
+        if entry.get("tool") == "run_command" and "cmdline" in cmd and out:
+            vllm_launch_args = out.strip()
         if entry.get("tool") == "run_command" and entry.get("success"):
             actions.append({
                 "type": "run_command",
                 "command": cmd[:80],
                 "timestamp": "",
             })
+
+    # Extract vLLM config from parsed logs
+    vllm_config = {}
+    for entry in tools.command_history:
+        if entry.get("tool") == "fetch_vllm_logs" and entry.get("success"):
+            parsed_sections = entry.get("parsed_sections", [])
+            if "engine_config" in parsed_sections or "server_config" in parsed_sections:
+                out = entry.get("output", "")
+                import re as _re
+                for line in out.split("\n"):
+                    line = line.strip()
+                    if ":" in line and not line.startswith("---") and not line.startswith("==="):
+                        parts = line.split(":", 1)
+                        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+                            k = parts[0].strip()
+                            if k not in ("cmdline",) and len(k) < 40:
+                                vllm_config[k] = parts[1].strip()
+                break
+
+    # Build benchmark settings
+    benchmark_settings = {
+        "Profiles": ", ".join(args.profiles) if hasattr(args, 'profiles') else "balanced",
+        "Concurrency levels": "1, 50",
+        "Max seconds per level": "30",
+        "Prefix caching on experiments": "enabled" if (hasattr(args, 'keep_prefix_caching') and args.keep_prefix_caching) else "disabled",
+        "Benchmark mode": "pod-based (GuideLLM on cluster)",
+    }
+
+    # vLLM image from pod template
+    vllm_image = ""
+    if pod_manager and hasattr(pod_manager, '_template'):
+        try:
+            vllm_image = pod_manager._template["spec"]["containers"][0].get("image", "")
+        except (KeyError, IndexError):
+            pass
 
     # Build summary from agent messages if the agent didn't call done
     summary = state.summary
@@ -513,6 +563,10 @@ def main():
         model_name=args.model,
         vllm_endpoint=args.vllm_endpoint,
         gpu_info=gpu_info,
+        vllm_image=vllm_image,
+        vllm_launch_args=vllm_launch_args,
+        benchmark_settings=benchmark_settings,
+        vllm_config=vllm_config,
         agent_summary=summary,
         baseline_results=baseline_results,
         final_results=final_results,

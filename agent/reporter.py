@@ -55,6 +55,9 @@ class TuningReport:
     model_name: str = ""
     vllm_endpoint: str = ""
     gpu_info: str = ""
+    vllm_image: str = ""
+    vllm_launch_args: str = ""
+    benchmark_settings: dict = field(default_factory=dict)
     vllm_config: dict = field(default_factory=dict)
     baseline_results: list = field(default_factory=list)
     final_results: list = field(default_factory=list)
@@ -108,17 +111,35 @@ class Reporter:
         return "\n".join(sections)
 
     def _header_section(self, report: TuningReport) -> str:
-        return "\n".join([
+        lines = [
             "# vLLM Performance Tuning Report",
             "",
             f"**Generated**: {report.timestamp}",
             f"**Model**: {report.model_name}",
             f"**Endpoint**: {report.vllm_endpoint}",
             f"**GPU**: {report.gpu_info}",
-            "",
-            "---",
-            "",
-        ])
+        ]
+        if report.vllm_image:
+            lines.append(f"**vLLM Image**: {report.vllm_image}")
+        if report.vllm_launch_args:
+            lines.append(f"**Launch Args**: `{report.vllm_launch_args}`")
+
+        # Server config table
+        if report.vllm_config:
+            lines.extend(["", "### Server Configuration", "",
+                          "| Parameter | Value |", "|-----------|-------|"])
+            for k, v in sorted(report.vllm_config.items()):
+                lines.append(f"| `{k}` | {v} |")
+
+        # Benchmark settings table
+        if report.benchmark_settings:
+            lines.extend(["", "### Benchmark Settings", "",
+                          "| Setting | Value |", "|---------|-------|"])
+            for k, v in sorted(report.benchmark_settings.items()):
+                lines.append(f"| {k} | {v} |")
+
+        lines.extend(["", "---", ""])
+        return "\n".join(lines)
 
     def _executive_summary_section(self, report: TuningReport) -> str:
         return "\n".join([
@@ -441,6 +462,9 @@ class Reporter:
             "model_name": report.model_name,
             "vllm_endpoint": report.vllm_endpoint,
             "gpu_info": report.gpu_info,
+            "vllm_image": report.vllm_image,
+            "vllm_launch_args": report.vllm_launch_args,
+            "benchmark_settings": report.benchmark_settings,
             "vllm_config": report.vllm_config,
             "agent_summary": report.agent_summary,
             "bottlenecks": report.bottlenecks,

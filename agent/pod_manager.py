@@ -57,6 +57,7 @@ class PodManager:
         self.active_pods: dict[str, dict] = {}  # pod_name -> {"port_forward_proc": ..., "local_port": ...}
         self.active_benchmark_pods: dict[str, dict] = {}  # pod_name -> metadata
         self._next_port = base_port
+        self.disable_prefix_caching = True  # default: disable on experiment pods
 
         # Load and validate the template once
         with open(self.base_yaml_path, "r") as f:
@@ -96,6 +97,9 @@ class PodManager:
         # Append tuning args to the container's args list
         container = manifest["spec"]["containers"][0]
         existing_args = list(container.get("args", []))
+        # Disable prefix caching by default for fair comparison (cold cache)
+        if self.disable_prefix_caching and "--no-enable-prefix-caching" not in vllm_args:
+            existing_args.append("--no-enable-prefix-caching")
         existing_args.extend(vllm_args)
         container["args"] = existing_args
 
