@@ -54,6 +54,7 @@ uv run score.py benchmark_results/test-run/prefill_heavy.json
 - After changing the config, commit the file, and then run it to deploy the vllm server on the node.
 - After deployment run the `guidellm` benchmark and `score.py` to get results.
 - Reason, and write down your analysis and next steps in the report.
+- Kill the vllm deployment using `kill.sh` script.
 - Repeat for 10 experiments, and then give your final conclusion in the report too.
 
 ---
