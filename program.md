@@ -14,6 +14,8 @@ CUDA_VISIBLE_DEVICES=7 /home/lab/rawhad/vllm_venv/bin/vllm serve Qwen/Qwen3-0.6B
 And ran a guidellm benchmark, using the following cmd:
 ```
 !mkdir -p benchmark_results/test-run/
+GUIDELLM_MAX_WORKER_PROCESSES=1 \
+GUIDELLM__MP_CONTEXT_TYPE=spawn \
 uv run guidellm benchmark run \
   --target "http://localhost:8100" \
   --model "qwen3-0.6b" \
