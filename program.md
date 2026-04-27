@@ -27,7 +27,7 @@ uv run guidellm benchmark run \
 ```
 
 
-I need you to run 10 experiments and work towards finding the best set of cli args for vllm server deployment,
+I need you to run 50 experiments and work towards finding the best set of cli args for vllm server deployment,
 that will provide the best results.
 You can run `score` script to get the final `goodput` score.
 This matters the most, and you can get it by running:
@@ -36,6 +36,11 @@ uv run score.py benchmark_results/test-run/prefill_heavy.json
 ```
 
 `goodput` metric is what you will be tracking, and your job is to make that go up!
+
+> We ran an earlier test version without the skills and the report for that is in `report-run-1.md`. I renamed it to add suffix `-run-1`
+
+I have added docs on vllm args and optimization methods. I would like you to refer to those when you are analyzing the results and hypothesizing, and designing next experiment setup.
+Make sure you refer to those docs before you run another experiment. The docs are at `docs/**/*.md`
 
 ---
 
@@ -55,7 +60,7 @@ uv run score.py benchmark_results/test-run/prefill_heavy.json
 - After deployment run the `guidellm` benchmark and `score.py` to get results.
 - Reason, and write down your analysis and next steps in the report.
 - Kill the vllm deployment using `kill.sh` script.
-- Repeat for 10 experiments, and then give your final conclusion in the report too.
+- Repeat for 50 experiments, and then give your final conclusion in the report too.
 
 ---
 
@@ -79,6 +84,6 @@ uv run score.py benchmark_results/test-run/prefill_heavy.json
 
 ---
 
-Start by getting a baseline, and then run the 10 experiments.
+Start by getting a baseline from the last experiment run, and then run at least 50 experiments.
 I am going to sleep right now, and I want you to run these experiments overnight, and so i can have a final report by the time I wake up in the morning.
 Thank you :D
