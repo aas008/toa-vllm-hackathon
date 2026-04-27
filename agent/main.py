@@ -71,8 +71,8 @@ Available Claude models: sonnet (default), opus, haiku
     parser.add_argument(
         "--max-iterations",
         type=int,
-        default=100,
-        help="Max agent loop iterations (default: 100)"
+        default=200,
+        help="Max agent loop iterations (default: 200)"
     )
     parser.add_argument(
         "--profiles",
