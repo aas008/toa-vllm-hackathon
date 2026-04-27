@@ -338,15 +338,23 @@ def _analyze_prometheus_in_benchmark(output: str) -> list[Anomaly]:
     """Extract anomalies from Prometheus delta embedded in benchmark output."""
     anomalies = []
 
-    # Check for preemptions
-    m = re.search(r"PREEMPTIONS:\s+(\d+)", output)
-    if m and int(m.group(1)) > 0:
-        count = int(m.group(1))
+    # Check for preemptions (>1% of requests = unsustainable)
+    preempt_m = re.search(r"PREEMPTIONS:\s+(\d+)\s+\(([\d.]+%)\s+of requests\)", output)
+    unsustainable_m = re.search(r"UNSUSTAINABLE.*preemption rate", output)
+    if unsustainable_m:
+        anomalies.append(Anomaly(
+            severity="error",
+            category="performance",
+            message="Workload UNSUSTAINABLE — preemption rate > 1%",
+            detail="Preemptions exceed 1% of requests. KV cache evictions cause re-computation. Reject this config.",
+        ))
+    elif preempt_m and int(preempt_m.group(1)) > 0:
+        count = int(preempt_m.group(1))
         anomalies.append(Anomaly(
             severity="warning",
             category="performance",
-            message=f"{count} preemptions during benchmark",
-            detail="Scheduler evicted sequences. Reduce concurrency or increase KV cache.",
+            message=f"{count} preemptions during benchmark ({preempt_m.group(2)} of requests)",
+            detail="Some scheduler evictions. Monitor at higher concurrency.",
         ))
 
     # Check KV cache pressure

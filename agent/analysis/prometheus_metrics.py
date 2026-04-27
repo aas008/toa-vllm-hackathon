@@ -201,10 +201,14 @@ class MetricsDelta:
                 else:
                     lines.append(f"  {display}: +{delta:,.0f} ({rate:,.2f}/sec)")
 
-            # Derived: preemption warning
+            # Derived: preemption check (>1% of requests = unsustainable)
             preemptions = self.counter_deltas.get("vllm:num_preemptions_total", 0)
+            success = self.counter_deltas.get("vllm:request_success_total", 0)
             if preemptions > 0:
-                lines.append(f"  ⚠ PREEMPTIONS: {preemptions:.0f} sequences evicted during run")
+                preempt_rate = preemptions / max(success, 1)
+                lines.append(f"  ⚠ PREEMPTIONS: {preemptions:.0f} ({preempt_rate:.1%} of requests)")
+                if preempt_rate > 0.01:
+                    lines.append(f"  ✖ UNSUSTAINABLE: preemption rate {preempt_rate:.1%} > 1% — workload exceeds server capacity")
 
             # Derived: token throughput
             gen_delta = self.counter_deltas.get("vllm:generation_tokens_total", 0)

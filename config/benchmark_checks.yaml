@@ -1,0 +1,102 @@
+# Post-Benchmark Health Checks
+#
+# These checks run automatically after every benchmark.
+# Edit thresholds here — no code changes needed.
+#
+# Each check has:
+#   metric: what to check (from Prometheus delta or benchmark output)
+#   condition: when to flag (threshold)
+#   severity: error | warning | info
+#   verdict: what it means for the experiment
+#   action: what the agent should do
+
+checks:
+
+  # ── Preemption check ──────────────────────────────────────────────
+  - name: preemption_rate
+    description: "Preemptions indicate KV cache evictions — workload is unsustainable"
+    metric: "vllm:num_preemptions_total (counter delta) / vllm:request_success_total (counter delta)"
+    threshold: 0.01  # 1% of requests
+    condition: "preemption_rate > threshold"
+    severity: error
+    verdict: "UNSUSTAINABLE — workload exceeds server capacity"
+    action: "Reject this config. Reduce concurrency or max-num-seqs."
+
+  # ── E2E latency SLO ──────────────────────────────────────────────
+  - name: e2e_latency_slo
+    description: "E2E request latency P99 must stay under target"
+    metric: "e2e_request_latency P99 (from GuideLLM or Prometheus)"
+    threshold_ms: 500
+    condition: "e2e_p99 > threshold_ms"
+    severity: error
+    verdict: "SLO VIOLATION — latency exceeds 500ms P99"
+    action: "Reject this config. It cannot meet the latency target."
+
+  # ── Error rate ───────────────────────────────────────────────────
+  - name: error_rate
+    description: "High request error rate indicates server instability"
+    metric: "errored_requests / total_requests"
+    threshold: 0.05  # 5%
+    condition: "error_rate > threshold"
+    severity: error
+    verdict: "UNSTABLE — too many failed requests"
+    action: "Check vLLM logs for OOM, CUDA errors, or crashes."
+
+  - name: error_rate_warning
+    description: "Moderate error rate — investigate"
+    metric: "errored_requests / total_requests"
+    threshold: 0.01  # 1%
+    condition: "error_rate > threshold AND error_rate <= 0.05"
+    severity: warning
+    verdict: "Some requests failing — may be transient"
+    action: "Check if errors are timeouts (increase max-seconds) or server issues."
+
+  # ── Zero requests ───────────────────────────────────────────────
+  - name: zero_successful
+    description: "No successful requests — server unreachable or crashed"
+    metric: "successful_requests"
+    threshold: 0
+    condition: "successful_requests == 0"
+    severity: error
+    verdict: "DEAD — vLLM pod unreachable or crashed"
+    action: "Run check_vllm_startup to diagnose. Pod likely OOM'd or failed to start."
+
+  # ── KV cache pressure ──────────────────────────────────────────
+  - name: kv_cache_full
+    description: "KV cache near capacity — preemptions imminent"
+    metric: "vllm:kv_cache_usage_perc (gauge)"
+    threshold: 0.95  # 95%
+    condition: "kv_cache_usage > threshold"
+    severity: warning
+    verdict: "KV cache nearly full — risk of preemptions under higher load"
+    action: "Consider reducing max-num-seqs, max-model-len, or using kv-cache-dtype fp8."
+
+  # ── Queue depth ─────────────────────────────────────────────────
+  - name: queue_depth
+    description: "Requests queuing faster than served"
+    metric: "vllm:num_requests_waiting (gauge at end of benchmark)"
+    threshold: 20
+    condition: "requests_waiting > threshold"
+    severity: warning
+    verdict: "Queuing — throughput bottleneck"
+    action: "Server cannot keep up at this concurrency. Reduce load or increase batch size."
+
+  # ── Throughput regression ───────────────────────────────────────
+  - name: throughput_regression
+    description: "Significant throughput drop vs baseline"
+    metric: "output_tokens_per_second vs baseline"
+    threshold: -0.10  # -10%
+    condition: "throughput_change < threshold"
+    severity: warning
+    verdict: "Throughput regression — this config is slower than baseline"
+    action: "Reject unless latency improved significantly."
+
+  # ── TTFT spike ──────────────────────────────────────────────────
+  - name: ttft_spike
+    description: "Very high time to first token"
+    metric: "time_to_first_token P99"
+    threshold_ms: 2000  # 2 seconds
+    condition: "ttft_p99 > threshold_ms"
+    severity: warning
+    verdict: "Prefill congestion — long queue or large batch blocking"
+    action: "Consider reducing max-num-batched-tokens or enabling chunked prefill."

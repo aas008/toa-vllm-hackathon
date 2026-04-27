@@ -245,8 +245,11 @@ ANALYSIS GUIDELINES:
 PROMETHEUS-DRIVEN ANALYSIS (use the auto-scraped delta from run_benchmark output):
 - kv_cache_usage_perc near 1.0 → KV cache full. Try: increase gpu-memory-utilization,
   reduce max-num-seqs, or enable chunked-prefill to limit batch memory
-- num_preemptions_total delta > 0 → scheduler evicting sequences to fit new ones.
-  This causes re-computation and hurts latency. Reduce max-num-seqs or increase cache
+- num_preemptions_total / request_success_total > 1% → UNSUSTAINABLE workload.
+  Preemptions cause KV cache evictions and re-computation. If preemption rate
+  exceeds 1% of requests, REJECT this config — the workload cannot be sustained.
+  Reduce max-num-seqs, concurrency, or increase cache.
+  (See config/benchmark_checks.yaml for all check thresholds)
 - num_requests_waiting stays high → requests queuing faster than served. Throughput bottleneck.
   Check if decode or prefill is the bottleneck using request_prefill_time vs request_decode_time
 - request_queue_time_seconds p95 growing → scheduling delay. Check max-num-seqs
