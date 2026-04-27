@@ -19,9 +19,8 @@ SERVER_DEPLOYMENT_CONFIG="--data-parallel-size 2 \
   --gpu-memory-utilization 0.95 \
   --kv-cache-dtype fp8 \
   --quantization fp8 \
-  --max-num-seqs 256 \
+  --max-num-seqs 20 \
   --performance-mode interactivity \
-  --enable-flashinfer-autotune \
   --disable-log-stats \
   -O3"
 # ===
