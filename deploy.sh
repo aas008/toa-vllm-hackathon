@@ -19,7 +19,7 @@ SERVER_DEPLOYMENT_CONFIG="--data-parallel-size 2 \
   --gpu-memory-utilization 0.95 \
   --kv-cache-dtype fp8 \
   --quantization fp8 \
-  --performance-mode interactivity \
+  --performance-mode throughput \
   --disable-log-stats \
   -O3"
 # ===
