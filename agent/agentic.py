@@ -365,12 +365,17 @@ EXACT STEPS (follow this order strictly):
 
 Phase 0 — Baseline Capacity Discovery:
 1. run_command("nvidia-smi") and run_command("cat /proc/1/cmdline | tr '\\0' ' '")
-2. Sweep concurrency on baseline to find SLO ceiling:
-   run_benchmark(profile="balanced", concurrency="1,10,25,50,100")
-3. fetch_vllm_logs + read_benchmark_results
-4. Find BASELINE_MAX_CONC = highest concurrency where E2E P99 < 500ms
-5. Record BASELINE_THROUGHPUT at that concurrency
+2. Create a BASELINE pod WITHOUT prefix caching for fair comparison:
+   create_vllm_pod(vllm_args=[])
+   → This creates a fresh pod with --no-enable-prefix-caching (auto-injected).
+   → Both baseline and experiments now have cold cache — apples-to-apples.
+3. Sweep concurrency on this baseline pod:
+   run_benchmark(profile="balanced", concurrency="1,10,25,50,100", endpoint=<from step 2>)
+4. fetch_vllm_logs(pod_name=<from step 2>) + read_benchmark_results
+5. Find BASELINE_MAX_CONC = highest concurrency where E2E P99 < 500ms
+6. Record BASELINE_THROUGHPUT at that concurrency
    → This is your target to beat. Save the JSON path.
+7. Keep this baseline pod running for comparison. Do NOT delete it yet.
 
 Phase 1 — Tune at BASELINE_MAX_CONC:
 6. For each experiment:
@@ -387,7 +392,8 @@ Phase 2 — Push higher (when improvement found):
    c. Keep pushing until P99 exceeds 500ms — that's the new ceiling
 
 Phase 3 — Report:
-8. Call done with:
+8. Delete the baseline pod from Phase 0 (delete_vllm_pod)
+9. Call done with:
    - Baseline capacity (max concurrency + throughput at SLO)
    - Best config found (max concurrency + throughput at SLO)
    - All experiment results table
@@ -581,6 +587,26 @@ Steps: fetch_vllm_logs + read_benchmark_results are MANDATORY after every benchm
             if name in ("run_command", "read_file"):
                 cmd_preview = inputs.get("command", inputs.get("path", ""))[:60]
                 print(f"      {cmd_preview}", flush=True)
+            elif name == "run_benchmark":
+                # Print key metrics from benchmark output
+                import re as _re
+                for line in output.split("\n"):
+                    if any(k in line for k in ("Output Tokens/sec:", "TTFT (ms):", "Success Rate:", "UNSUSTAINABLE", "PREEMPTIONS")):
+                        print(f"      {line.strip()[:100]}", flush=True)
+            elif name == "compare_benchmarks":
+                for line in output.split("\n"):
+                    if any(k in line for k in ("REGRESSION:", "IMPROVED:", "Verdict:")):
+                        print(f"      {line.strip()[:100]}", flush=True)
+            elif name == "create_vllm_pod":
+                args_str = " ".join(inputs.get("vllm_args", []))
+                print(f"      Args: {args_str}", flush=True)
+            elif name == "query_knowledge_base":
+                topic = inputs.get("topic", "")
+                print(f"      Topic: {topic}", flush=True)
+            elif name == "check_vllm_startup" or name == "check_benchmark_health":
+                for line in output.split("\n"):
+                    if any(k in line for k in ("ERROR", "WARNING", "UNSUSTAINABLE", "DEAD")):
+                        print(f"      {line.strip()[:100]}", flush=True)
 
         log_entry["output"] = output[:6000]
 
@@ -607,7 +633,7 @@ Steps: fetch_vllm_logs + read_benchmark_results are MANDATORY after every benchm
         for block in response.content:
             if block.type == "text":
                 content.append({"type": "text", "text": block.text})
-                print(f"   Agent: {block.text[:120]}...", flush=True)
+                print(f"   Agent: {block.text[:300]}", flush=True)
             elif block.type == "tool_use":
                 content.append({
                     "type": "tool_use",
