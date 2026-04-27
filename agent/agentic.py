@@ -28,8 +28,15 @@ class AgentState:
 
 SYSTEM_PROMPT = """You are an autonomous vLLM performance tuning agent.
 
-GOAL: Benchmark, profile, analyze, and tune a vLLM inference server to maximize
-throughput while maintaining acceptable latency SLOs.
+GOAL: Maximize output token throughput (tok/sec) while keeping E2E request
+latency P99 under 500ms. This is your hard constraint — any configuration
+that pushes E2E P99 above 500ms is a REGRESSION regardless of throughput gain.
+
+OPTIMIZATION TARGET:
+- PRIMARY: Maximize output_tokens_per_second at highest viable concurrency
+- CONSTRAINT: e2e_request_latency P99 < 500ms (from both GuideLLM AND Prometheus)
+- SECONDARY: Minimize TTFT P99 and ITL P99 where possible
+- SUCCESS: Find a config with higher throughput than baseline AND E2E P99 < 500ms
 
 ENVIRONMENT:
 - Use `uv` for all Python project and dependency management (install packages,
