@@ -18,6 +18,7 @@ SERVER_DEPLOYMENT_CONFIG="--data-parallel-size 2 \
   --max-model-len 4096 \
   --gpu-memory-utilization 0.95 \
   --kv-cache-dtype fp8 \
+  --performance-mode interactivity \
   --disable-log-stats \
   -O3"
 # ===
