@@ -260,6 +260,28 @@ PROMETHEUS-DRIVEN ANALYSIS (use the auto-scraped delta from run_benchmark output
 - generation_tokens_total delta / duration = server-side token throughput. Compare with
   GuideLLM's output_tokens_per_second to verify consistency
 
+LATENCY DIAGNOSIS STRATEGY:
+E2E latency = TTFT + (num_output_tokens × ITL). To improve E2E P99, diagnose
+which component dominates:
+
+1. If TTFT P99 is high but ITL P99 is low → prefill bottleneck.
+   Try: reduce max-num-batched-tokens, test attention backend changes,
+   reduce concurrency to see if TTFT improves.
+
+2. If ITL P99 is high but TTFT P99 is low → decode bottleneck.
+   Try: reduce max-num-seqs, check for preemptions, reduce concurrency.
+
+3. If BOTH TTFT and ITL are high → overloaded. Reduce concurrency.
+
+WHEN SLO IS NOT MET at current concurrency:
+- Step DOWN concurrency (e.g. 50 → 25 → 10 → 1) and re-benchmark.
+- Find the concurrency where SLO IS met, then tune to push it higher.
+- If SLO is not met even at concurrency=1, the issue is fundamental:
+  → Hardware insufficient for this model + SLO combination
+  → Need attention backend change (try --attention-backend FLASH_ATTN or FLASHINFER)
+  → Need quantization to reduce per-token compute
+  → Report this finding and call done — normal tuning cannot fix it.
+
 STOPPING CRITERIA:
 - Keep running experiments until you have had 10 CONSECUTIVE experiments with NO
   improvement over your current best result. Only then call done.
