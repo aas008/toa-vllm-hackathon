@@ -397,6 +397,22 @@ class PodManager:
             },
             "spec": {
                 "restartPolicy": "Never",
+                "affinity": {
+                    "nodeAffinity": {
+                        "requiredDuringSchedulingIgnoredDuringExecution": {
+                            "nodeSelectorTerms": [{
+                                "matchExpressions": [{
+                                    "key": "kubernetes.io/hostname",
+                                    "operator": "In",
+                                    "values": [
+                                        "psap-gpu-xhnvx-worker-3-5g8cv",
+                                        "psap-gpu-xhnvx-worker-3-6bsjp",
+                                    ],
+                                }],
+                            }],
+                        },
+                    },
+                },
                 "containers": [{
                     "name": "guidellm",
                     "image": self.GUIDELLM_IMAGE,
