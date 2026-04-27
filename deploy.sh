@@ -15,12 +15,11 @@ VLLM_CMD="CUDA_VISIBLE_DEVICES=4,5,6,7 /home/lab/rawhad/venvs/vllm_venv/bin/vllm
 # ===
 SERVER_DEPLOYMENT_CONFIG="--data-parallel-size 2 \
   --tensor-parallel-size 2 \
-  --max-model-len 4096 \
+  --max-model-len 2560 \
   --gpu-memory-utilization 0.95 \
   --kv-cache-dtype fp8 \
   --quantization fp8 \
   --max-num-seqs 256 \
-  --max-num-batched-tokens 16384 \
   --performance-mode interactivity \
   --disable-log-stats \
   -O3"
