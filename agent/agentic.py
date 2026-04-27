@@ -38,6 +38,28 @@ OPTIMIZATION TARGET:
 - SECONDARY: Minimize TTFT P99 and ITL P99 where possible
 - SUCCESS: Find a config with higher throughput than baseline AND E2E P99 < 500ms
 
+STRATEGY — INCREMENTAL LOAD DISCOVERY:
+Real performance gains from tuning are usually under 50%. Instead of only
+testing at fixed concurrency, first find the BASELINE CEILING — the maximum
+concurrency where E2E P99 stays under 500ms on default config.
+
+Phase 0 — Baseline Capacity Discovery (before any tuning):
+1. Benchmark baseline at concurrency="1,10,25,50,100" to find the SLO ceiling
+2. Find the highest concurrency where E2E P99 < 500ms — this is BASELINE_MAX_CONC
+3. Record the throughput at BASELINE_MAX_CONC — this is BASELINE_THROUGHPUT
+
+Phase 1 — Tune at BASELINE_MAX_CONC:
+4. Run experiments at the same concurrency level to see if tuning improves throughput
+   while staying under 500ms P99
+
+Phase 2 — Push higher (if improvements found):
+5. When an experiment shows improvement, re-test it at BASELINE_MAX_CONC + 25%
+   to see if it can handle more load while still meeting the SLO
+6. Keep incrementally increasing concurrency as long as P99 < 500ms
+
+This way you measure REAL gains — not just "same concurrency slightly faster"
+but "can handle MORE concurrent requests at the same latency target".
+
 ENVIRONMENT:
 - Use `uv` for all Python project and dependency management (install packages,
   run scripts, manage virtualenvs). For example: `uv pip install guidellm`,
@@ -338,28 +360,36 @@ CRITICAL RULES:
 
 EXACT STEPS (follow this order strictly):
 
-Phase 1 — Baseline:
-1. Call run_command with command="nvidia-smi" (1 tool call)
-2. Call run_command with command="cat /proc/1/cmdline | tr '\\0' ' '" (see vLLM launch args)
-3. Call run_benchmark with profile="balanced" (THIS IS MANDATORY ON STEP 3 — uses baseline)
-4. AFTER benchmark completes, ALWAYS call BOTH:
-   a. fetch_vllm_logs (parses baseline pod's vLLM server config, memory, errors)
-   b. read_benchmark_results with the JSON path from step 3 output
-   → SAVE the baseline JSON path for later compare_benchmarks calls.
+Phase 0 — Baseline Capacity Discovery:
+1. run_command("nvidia-smi") and run_command("cat /proc/1/cmdline | tr '\\0' ' '")
+2. Sweep concurrency on baseline to find SLO ceiling:
+   run_benchmark(profile="balanced", concurrency="1,10,25,50,100")
+3. fetch_vllm_logs + read_benchmark_results
+4. Find BASELINE_MAX_CONC = highest concurrency where E2E P99 < 500ms
+5. Record BASELINE_THROUGHPUT at that concurrency
+   → This is your target to beat. Save the JSON path.
 
-Phase 2 — Experiments (repeat for each tuning attempt):
-5. Call create_vllm_pod with vllm_args (e.g. ["--enable-chunked-prefill"])
-   → Note the returned pod_name and endpoint
-6. Call run_benchmark with profile="balanced" AND endpoint from step 5
-7. Call fetch_vllm_logs with pod_name from step 5
-8. Call read_benchmark_results with the JSON path from step 6
-9. Call compare_benchmarks with baseline JSON (step 4b) and experiment JSON (step 8)
-10. Call delete_vllm_pod with pod_name from step 5
+Phase 1 — Tune at BASELINE_MAX_CONC:
+6. For each experiment:
+   a. create_vllm_pod(vllm_args=[...])
+   b. run_benchmark(profile="balanced", concurrency=str(BASELINE_MAX_CONC), endpoint=...)
+   c. fetch_vllm_logs + read_benchmark_results + compare_benchmarks
+   d. Check: E2E P99 < 500ms AND throughput > BASELINE_THROUGHPUT?
+   e. delete_vllm_pod
 
-Phase 3 — Completion:
-11. After all experiments, call done with a summary of all comparison results.
+Phase 2 — Push higher (when improvement found):
+7. If an experiment beats baseline throughput while meeting SLO:
+   a. Re-test at concurrency = BASELINE_MAX_CONC * 1.25 (rounded)
+   b. If still meets SLO, try BASELINE_MAX_CONC * 1.5
+   c. Keep pushing until P99 exceeds 500ms — that's the new ceiling
 
-Steps 4a/4b (and 7/8 for experiments) are MANDATORY after every benchmark."""
+Phase 3 — Report:
+8. Call done with:
+   - Baseline capacity (max concurrency + throughput at SLO)
+   - Best config found (max concurrency + throughput at SLO)
+   - All experiment results table
+
+Steps: fetch_vllm_logs + read_benchmark_results are MANDATORY after every benchmark."""
             }
         ]
 
