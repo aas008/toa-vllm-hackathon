@@ -13,12 +13,13 @@ VLLM_CMD="CUDA_VISIBLE_DEVICES=4,5,6,7 /home/lab/rawhad/venvs/vllm_venv/bin/vllm
 # ===
 # DEPLOYMENT CONFIGS THAT YOU (#claude-code) SHOULD OPTIMIZE
 # ===
-SERVER_DEPLOYMENT_CONFIG="--tensor-parallel-size 4 \
+SERVER_DEPLOYMENT_CONFIG="--data-parallel-size 2 \
+  --tensor-parallel-size 2 \
   --max-model-len 4096 \
   --gpu-memory-utilization 0.95 \
   --kv-cache-dtype fp8 \
   --quantization fp8 \
-  --performance-mode interactivity \
+  --max-num-seqs 256 \
   --disable-log-stats \
   -O3"
 # ===
