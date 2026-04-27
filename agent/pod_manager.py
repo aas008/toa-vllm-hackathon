@@ -6,7 +6,7 @@ The baseline pod is never modified; experiment pods are created with different
 vLLM launch args, benchmarked, compared against baseline, then deleted.
 
 Usage:
-    pm = PodManager(namespace="toa-hack", kubeconfig=None, base_pod_yaml_path="aanya-pod.yaml")
+    pm = PodManager(namespace="toa-hack", kubeconfig=None, base_pod_yaml_path="vllm-pod-template.yaml")
     pod_name, endpoint = pm.create_pod(["--enable-chunked-prefill", "--gpu-memory-utilization", "0.95"])
     # ... run benchmarks against endpoint ...
     pm.delete_pod(pod_name)
@@ -38,7 +38,7 @@ class PodManager:
     kubeconfig : str or None
         Path to kubeconfig. If None, uses default (~/.kube/config or $KUBECONFIG).
     base_pod_yaml_path : str
-        Path to the pod YAML template (e.g. aanya-pod.yaml).
+        Path to the pod YAML template (e.g. vllm-pod-template.yaml).
     base_port : int
         First local port to assign for port-forwarding experiment pods.
     """
@@ -47,7 +47,7 @@ class PodManager:
         self,
         namespace: str,
         kubeconfig: Optional[str] = None,
-        base_pod_yaml_path: str = "aanya-pod.yaml",
+        base_pod_yaml_path: str = "vllm-pod-template.yaml",
         base_port: int = 8001,
     ):
         self.namespace = namespace

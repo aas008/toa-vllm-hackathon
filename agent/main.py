@@ -144,7 +144,7 @@ Available Claude models: sonnet (default), opus, haiku
         default=None,
         help=(
             "Path to a pod YAML template for creating experiment pods "
-            "(e.g. aanya-pod.yaml). Enables the create_vllm_pod/delete_vllm_pod tools. "
+            "(e.g. vllm-pod-template.yaml). Enables the create_vllm_pod/delete_vllm_pod tools. "
             "Requires --oc-mode."
         ),
     )

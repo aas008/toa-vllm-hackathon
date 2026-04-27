@@ -94,7 +94,7 @@ python -m agent \
     --vllm-endpoint http://localhost:8000 \
     --model /models/facebook/opt-125m \
     --oc-mode \
-    --oc-pod aanya-vllm-test-pod \
+    --oc-pod vllm-baseline \
     --oc-namespace toa-hack \
     --kubeconfig /path/to/kubeconfig \
     --vertex \
@@ -109,7 +109,7 @@ python -m agent \
     --vllm-endpoint http://localhost:8000 \
     --model /models/facebook/opt-125m \
     --oc-mode \
-    --oc-pod aanya-vllm-test-pod \
+    --oc-pod vllm-baseline \
     --oc-namespace toa-hack \
     --kubeconfig /path/to/kubeconfig \
     --api-key $ANTHROPIC_API_KEY \
@@ -262,7 +262,7 @@ python3 -m agent \
     --oc-mode --oc-pod vllm-llama-1b \
     --oc-namespace toa-hack \
     --kubeconfig /path/to/kubeconfig \
-    --pod-template aanya-pod.yaml \
+    --pod-template vllm-pod-template.yaml \
     --vertex --claude-model haiku \
     --max-iterations 50 --profiles balanced \
     --output reports/
