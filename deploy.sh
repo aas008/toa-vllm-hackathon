@@ -5,7 +5,7 @@ NODE="rh-h100-02"
 SESSION="rohan-qwen3-06b"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
 
-VLLM_CMD="CUDA_VISIBLE_DEVICES=4,5,6,7 VLLM_USE_DEEP_GEMM=1 /home/lab/rawhad/venvs/vllm_venv/bin/vllm serve Qwen/Qwen3-0.6B \
+VLLM_CMD="CUDA_VISIBLE_DEVICES=4,5,6,7 /home/lab/rawhad/venvs/vllm_venv/bin/vllm serve Qwen/Qwen3-0.6B \
   --served-model-name qwen3-0.6b \
   --host 0.0.0.0 \
   --port 8100"
@@ -20,6 +20,7 @@ SERVER_DEPLOYMENT_CONFIG="--data-parallel-size 2 \
   --kv-cache-dtype fp8 \
   --quantization fp8 \
   --max-num-seqs 256 \
+  --max-num-partial-prefills 2 \
   --performance-mode interactivity \
   --disable-log-stats \
   -O3"
