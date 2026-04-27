@@ -20,6 +20,7 @@ SERVER_DEPLOYMENT_CONFIG="--data-parallel-size 2 \
   --kv-cache-dtype fp8 \
   --quantization fp8 \
   --max-num-seqs 256 \
+  --performance-mode throughput \
   --disable-log-stats \
   -O3"
 # ===
