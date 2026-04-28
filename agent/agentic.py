@@ -370,28 +370,29 @@ class AgenticRunner:
         self.messages = [
             {
                 "role": "user",
-                "content": f"""You are connected to a vLLM inference server (baseline pod).
+                "content": f"""You are a vLLM performance tuning agent.
 
-Baseline endpoint (port-forwarded): {self.vllm_endpoint}
 Model: {self.model_name}
 Profiles to benchmark: {', '.join(self.profiles)}
 
 CRITICAL RULES:
-- The BASELINE pod is NEVER modified or restarted. It serves as your reference.
-- To test tuning parameters, create EXPERIMENT pods with create_vllm_pod.
-- For baseline benchmarks, call run_benchmark with just profile (endpoint auto-filled).
-- For experiment benchmarks, pass the endpoint returned by create_vllm_pod.
-- NEVER call done after a benchmark failure. Diagnose from vLLM logs instead.
+- You have NO pre-existing pod. Create all pods with create_vllm_pod.
+- The FIRST pod you create is the BASELINE. Do not delete it until done.
+- For experiment pods, create NEW pods with different args.
+- NEVER call done after a benchmark failure. Diagnose from logs instead.
+- GPU health check (nvidia-smi) runs AUTOMATICALLY on every pod creation.
 
 EXACT STEPS (follow this order strictly):
 
 Phase 0 — Baseline Capacity Discovery:
-1. run_command("nvidia-smi") and run_command("cat /proc/1/cmdline | tr '\\0' ' '")
-2. Create a BASELINE pod WITHOUT prefix caching for fair comparison:
+1. Create a BASELINE pod:
    create_vllm_pod(vllm_args=[])
-   → This creates a fresh pod with --no-enable-prefix-caching (auto-injected).
-   → Both baseline and experiments now have cold cache — apples-to-apples.
-3. Sweep concurrency on this baseline pod:
+   → GPU health check runs automatically (nvidia-smi)
+   → --no-enable-prefix-caching auto-injected for fair comparison
+   → This pod becomes your default for run_command/fetch_vllm_logs
+   → Note the returned endpoint URL
+2. run_command("cat /proc/1/cmdline | tr '\\0' ' '") to see vLLM launch args
+3. Sweep concurrency on baseline:
    run_benchmark(profile="balanced", concurrency="1,10,25,50,100", endpoint=<from step 2>)
 4. fetch_vllm_logs(pod_name=<from step 2>) + read_benchmark_results
 5. Find BASELINE_MAX_CONC = highest concurrency where E2E P99 < 500ms

@@ -130,11 +130,6 @@ Available Claude models: sonnet (default), opus, haiku
         help="OpenShift namespace for oc exec (default: toa-hack)"
     )
     parser.add_argument(
-        "--oc-pod",
-        default=None,
-        help="Pod name for oc exec (required if --oc-mode)"
-    )
-    parser.add_argument(
         "--kubeconfig",
         default=os.environ.get("KUBECONFIG"),
         help="Path to kubeconfig file (default: $KUBECONFIG)"
@@ -244,36 +239,20 @@ def main():
     print(f"Mode:           {'PROFILING' if args.profile else 'TUNING'}")
     print(f"Output Dir:     {args.output}")
 
-    # Validate mode-specific args
-    if not args.oc_mode and not args.vllm_host:
-        print("Error: --vllm-host is required for SSH mode. Use --oc-mode for OpenShift.")
-        sys.exit(1)
-
-    # Set up remote executor (SSH or oc exec)
+    # Validate execution mode
     if args.oc_mode:
-        if not args.oc_pod:
-            print("Error: --oc-pod is required when using --oc-mode")
-            sys.exit(1)
-        print_step(f"Using oc exec mode: {args.oc_namespace}/{args.oc_pod}")
-        executor = OcExecutor(
-            namespace=args.oc_namespace,
-            pod_name=args.oc_pod,
-            kubeconfig=args.kubeconfig,
-        )
-        # Test connectivity
-        test_result = executor.run("echo OK")
-        if not test_result.success:
-            print(f"Error: Cannot connect to pod: {test_result.stderr}")
-            sys.exit(1)
-        print(f"  oc exec to {args.oc_pod}: OK")
+        print_step(f"Using oc exec mode: namespace={args.oc_namespace}")
+        print(f"  Agent will create its own pods — no pre-existing pod needed.")
     else:
+        if not args.vllm_host:
+            print("Error: --vllm-host is required for SSH mode. Use --oc-mode for OpenShift.")
+            sys.exit(1)
         print_step("Testing SSH connectivity to vLLM host...")
         ssh = SSHClient(args.vllm_host, user=args.ssh_user)
         if not ssh.test_connection():
             print(f"Error: Cannot connect to vLLM host ({args.vllm_host})")
             sys.exit(1)
         print(f"  SSH to {args.vllm_host}: OK")
-        executor = SSHExecutor(ssh)
 
     # Test Claude API connectivity
     print_step(f"Testing Claude API connectivity ({backend})...")
@@ -334,13 +313,11 @@ def main():
 
     # Create tools and agent
     tools = AgentTools(
-        executor=executor,
         vllm_endpoint=args.vllm_endpoint,
         model_name=args.model,
         pod_manager=pod_manager,
         namespace=args.oc_namespace if args.oc_mode else None,
         kubeconfig=args.kubeconfig,
-        baseline_pod_name=args.oc_pod if args.oc_mode else None,
         knowledge_base=knowledge_base,
     )
 

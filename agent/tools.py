@@ -153,6 +153,22 @@ class SSHExecutor(RemoteExecutor):
         return self._client.test_connection()
 
 
+class _StubExecutor(RemoteExecutor):
+    """Placeholder executor when no pod exists yet."""
+
+    def run(self, command: str, timeout: int = 60) -> CommandResult:
+        return CommandResult("", "No pod available. Create a pod first.", -1, False)
+
+    def read_file(self, path: str) -> CommandResult:
+        return CommandResult("", "No pod available.", -1, False)
+
+    def write_file(self, path: str, content: str) -> CommandResult:
+        return CommandResult("", "No pod available.", -1, False)
+
+    def test_connection(self) -> bool:
+        return False
+
+
 class OcExecutor(RemoteExecutor):
     """Execute commands on a vLLM pod via ``oc exec`` (OpenShift).
 
@@ -2485,33 +2501,44 @@ def dispatch_tool(
 # ---------------------------------------------------------------------------
 
 class AgentTools:
-    """Higher-level wrapper that bundles an executor with tool dispatch.
+    """Higher-level wrapper that bundles tool dispatch with on-demand executors.
 
-    Provides a class-based interface similar to the original ai-perf-hackathon
-    AgentTools, but backed by the RemoteExecutor abstraction.
+    No pre-existing pod required. Creates OcExecutor instances on-demand
+    targeting the default_pod_name (set by first create_vllm_pod call)
+    or explicit pod_name from tool args.
     """
 
     def __init__(
         self,
-        executor: RemoteExecutor,
         vllm_endpoint: str = "http://localhost:8000",
         model_name: str = "",
         pod_manager: Optional[PodManager] = None,
         namespace: Optional[str] = None,
         kubeconfig: Optional[str] = None,
-        baseline_pod_name: Optional[str] = None,
         knowledge_base=None,
     ):
-        self.executor = executor
         self.vllm_endpoint = vllm_endpoint
         self.model_name = model_name
         self.pod_manager = pod_manager
         self.namespace = namespace
         self.kubeconfig = kubeconfig
-        self.baseline_pod_name = baseline_pod_name
         self.knowledge_base = knowledge_base
+        self.default_pod_name: Optional[str] = None
         self.command_history: list[dict] = []
         self.metrics_snapshots: dict = {}
+
+    def _get_executor(self, pod_name: Optional[str] = None) -> RemoteExecutor:
+        """Create an OcExecutor targeting a specific pod, or the default."""
+        target = pod_name or self.default_pod_name
+        if not target:
+            raise RuntimeError(
+                "No pod available. Create a pod first with create_vllm_pod."
+            )
+        return OcExecutor(
+            namespace=self.namespace or "toa-hack",
+            pod_name=target,
+            kubeconfig=self.kubeconfig,
+        )
 
     def get_tool_definitions(self) -> list[dict]:
         """Return tool definitions, including knowledge base if configured."""
@@ -2570,15 +2597,41 @@ class AgentTools:
                 return ToolResult(tool="query_knowledge_base", success=True, output=output)
             except Exception as e:
                 return ToolResult(tool="query_knowledge_base", success=False, output="", error=str(e))
+        # Set default_pod_name on first create_vllm_pod success
+        if name == "create_vllm_pod" and self.default_pod_name is None:
+            result = dispatch_tool(
+                name, args, self._get_executor_safe(), self.command_history,
+                pod_manager=self.pod_manager,
+                namespace=self.namespace,
+                kubeconfig=self.kubeconfig,
+                metrics_snapshots=self.metrics_snapshots,
+                default_endpoint=self.vllm_endpoint,
+                baseline_pod_name=self.default_pod_name,
+            )
+            if result.success and self.pod_manager:
+                pods = list(self.pod_manager.active_pods.keys())
+                if pods:
+                    self.default_pod_name = pods[0]
+                    print(f"   Default pod set: {self.default_pod_name}", flush=True)
+            return result
+
+        executor = self._get_executor_safe()
         return dispatch_tool(
-            name, args, self.executor, self.command_history,
+            name, args, executor, self.command_history,
             pod_manager=self.pod_manager,
             namespace=self.namespace,
             kubeconfig=self.kubeconfig,
             metrics_snapshots=self.metrics_snapshots,
             default_endpoint=self.vllm_endpoint,
-            baseline_pod_name=self.baseline_pod_name,
+            baseline_pod_name=self.default_pod_name,
         )
+
+    def _get_executor_safe(self) -> RemoteExecutor:
+        """Get executor, returning a stub if no pod exists yet."""
+        try:
+            return self._get_executor()
+        except RuntimeError:
+            return _StubExecutor()
 
     # Convenience methods for direct (non-agent) use
 

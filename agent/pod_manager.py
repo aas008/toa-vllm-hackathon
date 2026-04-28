@@ -214,6 +214,7 @@ class PodManager:
         print(f"   Waiting for pod {pod_name} to be ready...", flush=True)
         self._wait_for_ready(pod_name)
         print(f"   Pod {pod_name} is ready.", flush=True)
+        self.validate_gpu(pod_name)
 
         # Start port-forward
         print(f"   Starting port-forward :{local_port} -> {pod_name}:8000", flush=True)
@@ -276,6 +277,7 @@ class PodManager:
         print(f"   Waiting for pod {pod_name} to be ready...", flush=True)
         self._wait_for_ready(pod_name, timeout=300)
         print(f"   Pod {pod_name} is ready.", flush=True)
+        self.validate_gpu(pod_name)
 
         print(f"   Starting port-forward :{local_port} -> {pod_name}:8000", flush=True)
         pf_proc = self._start_port_forward(pod_name, local_port)
@@ -536,6 +538,40 @@ class PodManager:
         cmd = self._build_oc_base() + ["logs", pod_name, f"--tail={tail}"]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         return result.stdout if result.returncode == 0 else result.stderr
+
+    # ── GPU Validation ────────────────────────────────────────────────────
+
+    def validate_gpu(self, pod_name: str) -> dict:
+        """Run nvidia-smi on a pod and return GPU status."""
+        cmd = self._build_oc_base() + [
+            "exec", pod_name, "--",
+            "nvidia-smi", "--query-gpu=name,memory.total,memory.used,memory.free",
+            "--format=csv,noheader,nounits",
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        if result.returncode != 0:
+            print(f"   GPU check failed: {result.stderr.strip()[:100]}", flush=True)
+            return {}
+
+        gpu_info = {}
+        for line in result.stdout.strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= 4:
+                gpu_info = {
+                    "gpu_name": parts[0],
+                    "memory_total_mb": int(float(parts[1])),
+                    "memory_used_mb": int(float(parts[2])),
+                    "memory_free_mb": int(float(parts[3])),
+                }
+                total = gpu_info["memory_total_mb"]
+                used = gpu_info["memory_used_mb"]
+                free = gpu_info["memory_free_mb"]
+                print(f"   GPU: {parts[0]} — {used} MB used / {total} MB total ({free} MB free)", flush=True)
+                if used > 1000:
+                    print(f"   ⚠ GPU memory not clean: {used} MB already in use before vLLM loads", flush=True)
+                break
+
+        return gpu_info
 
     def get_active_pods(self) -> dict[str, dict]:
         """Return info about active experiment pods."""
